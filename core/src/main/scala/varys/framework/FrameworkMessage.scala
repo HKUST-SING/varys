@@ -1,7 +1,5 @@
 package varys.framework
 
-import akka.actor.ActorRef
-
 import varys.framework.master.{CoflowInfo, SlaveInfo}
 
 private[varys] sealed trait FrameworkMessage extends Serializable
@@ -26,7 +24,7 @@ private[varys] case class LocalCoflows(
     slaveId: String,
     coflowIds: Array[Int],
     sizes: Array[Long],
-    flows: Array[Array[String]])
+    flows: Array[Array[Flow]])
   extends FrameworkMessage
 
 // Master to Slave
@@ -80,14 +78,12 @@ private[varys] case class RegisterSlaveClient(
 
 private[varys] case class StartedFlow(
     coflowId: Int,
-    sIPPort: String,
-    dIPPort: String)
+    flow: Flow)
   extends FrameworkMessage
 
 private[varys] case class CompletedFlow(
     coflowId: Int,
-    sIPPort: String,
-    dIPPort: String)
+    flow: Flow)
   extends FrameworkMessage
 
 private[varys] case class UpdateCoflowSize(
@@ -183,6 +179,7 @@ private[varys] case class SlaveState(
     masterUrl: String, 
     rxBps: Double,
     txBps: Double,
+    runningFlows: Array[Flow],
     masterWebUiUrl: String)
 
 // Slave to Client

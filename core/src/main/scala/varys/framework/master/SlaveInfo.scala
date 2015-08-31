@@ -4,6 +4,8 @@ import akka.actor.ActorRef
 
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 
+import varys.framework.Flow
+
 import varys.util.BpsInfo
 
 private[varys] class SlaveInfo(
@@ -41,12 +43,12 @@ private[varys] class SlaveInfo(
   var numCoflows = 0
   var coflowIds: Array[Int] = null
   var sizes: Array[Long] = null
-  var flows: Array[Array[String]] = null
+  var flows: Array[Array[Flow]] = null
 
   def updateCoflows(
       coflowIds_ : Array[Int], 
       sizes_ : Array[Long], 
-      flows_ : Array[Array[String]]) {
+      flows_ : Array[Array[Flow]]) {
 
     numCoflows = coflowIds_.size
     coflowIds = coflowIds_

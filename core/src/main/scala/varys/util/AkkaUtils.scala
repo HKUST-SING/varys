@@ -81,6 +81,8 @@ private[varys] object AkkaUtils {
             kryo-trace = false
 
             classes = [
+              "varys.framework.Flow",
+              "[[Lvarys.framework.Flow;",
               "varys.framework.RegisterSlave",  
               "varys.framework.Heartbeat",
               "varys.framework.LocalCoflows",

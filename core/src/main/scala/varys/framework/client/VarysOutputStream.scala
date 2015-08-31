@@ -1,24 +1,20 @@
 package varys.framework.client
 
-import akka.actor._
-import akka.remote.{RemotingLifecycleEvent, DisassociatedEvent}
-
 import java.io._
 import java.net._
-import java.util.concurrent.{ArrayBlockingQueue, ConcurrentHashMap, LinkedBlockingQueue}
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic._
 
-import net.openhft.chronicle.ExcerptTailer
-import net.openhft.chronicle.VanillaChronicle
-
-import scala.collection.mutable.ListBuffer
-import scala.collection.JavaConversions._
-import scala.concurrent.duration._
-
-import varys.{Logging, Utils, VarysException}
+import akka.actor._
+import akka.remote.{DisassociatedEvent, RemotingLifecycleEvent}
+import net.openhft.chronicle.{ExcerptTailer, VanillaChronicle}
 import varys.framework._
 import varys.framework.slave.Slave
 import varys.util._
+import varys.{Logging, Utils}
+
+import scala.collection.JavaConversions._
+import scala.collection.mutable.ListBuffer
 
 /**
  * The VarysOutputStream enables Varys on OutputStream. 
@@ -36,6 +32,9 @@ class VarysOutputStream(
   val dIP = Utils.getIPFromSocketAddress(sock.getRemoteSocketAddress)
 
   var visId: Int = -1
+
+  val flow = new Flow(sock.getLocalAddress.getHostAddress, sock.getLocalPort,
+                      sock.getInetAddress.getHostAddress, sock.getPort)
 
   val rawStream = sock.getOutputStream
 
@@ -78,7 +77,7 @@ class VarysOutputStream(
    * Wait for order from control after the minimum bytes have been transfered
    */
   private def preWrite() {
-    if (bytesWritten >= MIN_NOTIFICATION_THRESHOLD && visId != -1 && 
+    if (bytesWritten >= MIN_NOTIFICATION_THRESHOLD && visId != -1 &&
         VarysOutputStream.slaveClientId != null) {
 
       while (!canProceed.get) {
@@ -184,13 +183,13 @@ private[client] object VarysOutputStream extends Logging {
     if (slaveClientId == null) {
       mbscLock.synchronized {
         if (slaveClientId == null) {
-          messagesBeforeSlaveConnection += StartedFlow(coflowId, sIP, vos.dIP)
+          messagesBeforeSlaveConnection += StartedFlow(coflowId, vos.flow)
         } else {
-          slaveActor ! StartedFlow(coflowId, sIP, vos.dIP)
+          slaveActor ! StartedFlow(coflowId, vos.flow)
         }
       }
     } else {
-      slaveActor ! StartedFlow(coflowId, sIP, vos.dIP)
+      slaveActor ! StartedFlow(coflowId, vos.flow)
     }
     vosId
   }
@@ -200,13 +199,13 @@ private[client] object VarysOutputStream extends Logging {
     if (slaveClientId == null) {
       mbscLock.synchronized {
         if (slaveClientId == null) {
-          messagesBeforeSlaveConnection -= StartedFlow(coflowId, sIP, vos.dIP)
+          messagesBeforeSlaveConnection -= StartedFlow(coflowId, vos.flow)
         } else {
-          slaveActor ! CompletedFlow(coflowId, sIP, vos.dIP)
+          slaveActor ! CompletedFlow(coflowId, vos.flow)
         }
       }
     } else {
-      slaveActor ! CompletedFlow(coflowId, sIP, vos.dIP)
+      slaveActor ! CompletedFlow(coflowId, vos.flow)
     }
     activeStreams -= vosId
     dstToStream -= vos.dIP

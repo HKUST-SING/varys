@@ -17,21 +17,16 @@
 
 package varys.framework.master.ui
 
-import akka.pattern.ask
-
 import javax.servlet.http.HttpServletRequest
 
+import akka.pattern.ask
 import net.liftweb.json.JsonAST.JValue
+import varys.framework.{JsonProtocol, MasterState, RequestMasterState}
+import varys.ui.UIUtils
 
 import scala.concurrent.Await
 import scala.concurrent.duration._
 import scala.xml.Node
-
-import varys.framework.{MasterState, RequestMasterState}
-import varys.framework.JsonProtocol
-import varys.framework.ClientInfo
-import varys.ui.UIUtils
-import varys.Utils
 
 private[varys] class CoflowPage(parent: MasterWebUI) {
   val master = parent.masterActorRef
@@ -43,7 +38,7 @@ private[varys] class CoflowPage(parent: MasterWebUI) {
     val stateFuture = (master ? RequestMasterState)(timeout).mapTo[MasterState]
     val state = Await.result(stateFuture, 30.seconds)
     val coflow = state.activeCoflows.find(_.id == coflowId.toInt).getOrElse({
-      state.completedCoflows.find(_.id == coflowId.toInt).getOrElse(null)
+      state.completedCoflows.find(_.id == coflowId.toInt).orNull
     })
     JsonProtocol.writeCoflowInfo(coflow)
   }
@@ -54,7 +49,7 @@ private[varys] class CoflowPage(parent: MasterWebUI) {
     val stateFuture = (master ? RequestMasterState)(timeout).mapTo[MasterState]
     val state = Await.result(stateFuture, 30.seconds)
     val coflow = state.activeCoflows.find(_.id == coflowId.toInt).getOrElse({
-      state.completedCoflows.find(_.id == coflowId.toInt).getOrElse(null)
+      state.completedCoflows.find(_.id == coflowId.toInt).orNull
     })
 
     val content =

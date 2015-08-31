@@ -1,31 +1,24 @@
 package varys.framework.slave
 
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic._
+
 import akka.actor._
 import akka.remote.{DisassociatedEvent, RemotingLifecycleEvent}
-
-import com.google.common.io.Files
-
-import java.io.{File, ObjectInputStream, ObjectOutputStream, IOException}
-import java.text.SimpleDateFormat
-import java.util.concurrent.atomic._
-import java.util.concurrent.{ConcurrentHashMap, LinkedBlockingQueue}
-import java.util.Date
-import java.net._
-
-import net.openhft.chronicle.ExcerptTailer
-import net.openhft.chronicle.VanillaChronicle
-
-import org.hyperic.sigar.{Sigar, SigarException, NetInterfaceStat}
-
-import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
-import scala.collection.JavaConversions._
-import scala.util.control.Breaks._
-
+import net.openhft.chronicle.{ExcerptTailer, VanillaChronicle}
+import org.hyperic.sigar.{Sigar, SigarException}
 import varys.framework._
 import varys.framework.master.Master
 import varys.framework.slave.ui.SlaveWebUI
-import varys.{Logging, Utils, VarysException}
 import varys.util._
+import varys.{Logging, Utils, VarysException}
+
+import scala.collection.JavaConversions._
+import scala.collection.mutable.ArrayBuffer
+import scala.util.control.Breaks._
 
 private[varys] class SlaveActor(
     ip: String,
@@ -35,13 +28,13 @@ private[varys] class SlaveActor(
     masterUrl: String,
     workDirPath: String = null)
   extends Actor with Logging {
-  
+
   case class CoflowInfo(
       val coflowId: Int,
       var curSize: Long) {
 
-    val flows = new ArrayBuffer[String]()
-    
+    val flows = new ArrayBuffer[Flow]()
+
     var lastUpdatedTime = System.currentTimeMillis
 
     var clientId: String = null
@@ -51,12 +44,12 @@ private[varys] class SlaveActor(
       lastUpdatedTime = System.currentTimeMillis
     }
 
-    def addFlow(dIP: String) {
-      flows += dIP
+    def addFlow(flow: Flow) {
+      flows += flow
     }
 
-    def deleteFlow(dIP: String) {
-      flows -= dIP
+    def deleteFlow(flow: Flow) {
+      flows -= flow
     }
 
     // Rate measurements
@@ -253,7 +246,7 @@ private[varys] class SlaveActor(
         if (coflows.containsKey(c)) {
           if (idToActor.containsKey(coflows(c).clientId)) {
             idToActor(coflows(c).clientId) ! StartSome(sendTo.toArray)
-            sendTo --= coflows(c).flows
+            sendTo --= coflows(c).flows.map(flow => flow.dIP)
           } else {
             logTrace("StartSome: idToActor doesn't contain " + coflows(c).clientId)
           }
@@ -280,29 +273,30 @@ private[varys] class SlaveActor(
     }
     
     case RequestSlaveState => {
-      sender ! SlaveState(ip, port, slaveId, masterUrl, curRxBps, curTxBps, masterWebUiUrl)
+      val runningFlows = coflows.values.flatMap(coflow => coflow.flows).toArray
+      sender ! SlaveState(ip, port, slaveId, masterUrl, curRxBps, curTxBps, runningFlows.toArray, masterWebUiUrl)
     }
     
-    case StartedFlow(coflowId, sIP, dIP) => {
+    case StartedFlow(coflowId, flow) => {
       val currentSender = sender
-      logDebug("Received StartedFlow for " + sIP + "-->" + dIP + " of coflow " + coflowId)
-      coflows(coflowId).addFlow(dIP)
+      logDebug("Received StartedFlow for " + flow + " of coflow " + coflowId)
+      coflows(coflowId).addFlow(flow)
       coflowUpdated.set(true)
     }
 
-    case CompletedFlow(coflowId, sIP, dIP) => {
+    case CompletedFlow(coflowId, flow) => {
       val currentSender = sender
-      logDebug("Received CompletedFlow for " + sIP + "-->" + dIP + " of coflow " + coflowId)
-      coflows(coflowId).deleteFlow(dIP)
+      logDebug("Received CompletedFlow for " + flow + " of coflow " + coflowId)
+      coflows(coflowId).deleteFlow(flow)
       coflowUpdated.set(true)
 
       // Prioritize flow from the next coflow until next update
       ccLock.synchronized {
         breakable {
           for (c <- currentCoflowOrder) {
-            if (c != coflowId && coflows.containsKey(c) && coflows(c).flows.contains(dIP)) {
-              logDebug("Promoted " + sIP + "-->" + dIP + " of coflow " + c)
-              idToActor(coflows(c).clientId) ! StartSome(Array(dIP))
+            if (c != coflowId && coflows.containsKey(c) && coflows(c).flows.contains(flow)) {
+              logDebug("Promoted " + flow.sIP + "-->" + flow.dIP + " of coflow " + c)
+              idToActor(coflows(c).clientId) ! StartSome(Array(flow.dIP))
               break
             }
           }

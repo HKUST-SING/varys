@@ -17,20 +17,17 @@
 
 package varys.framework.slave.ui
 
-import akka.pattern.ask
-
+import java.util.Date
 import javax.servlet.http.HttpServletRequest
 
+import akka.pattern.ask
 import net.liftweb.json.JsonAST.JValue
+import varys.framework._
+import varys.ui.UIUtils
 
-import scala.xml.Node
 import scala.concurrent.Await
 import scala.concurrent.duration._
-
-import varys.framework.JsonProtocol
-import varys.framework.{RequestSlaveState, SlaveState}
-import varys.ui.UIUtils
-import varys.Utils
+import scala.xml.Node
 
 private[varys] class IndexPage(parent: SlaveWebUI) {
   val slaveActor = parent.slave.self
@@ -47,6 +44,9 @@ private[varys] class IndexPage(parent: SlaveWebUI) {
     val stateFuture = (slaveActor ? RequestSlaveState)(timeout).mapTo[SlaveState]
     val slaveState = Await.result(stateFuture, 30.seconds)
 
+    val flowHeaders = Seq("Start Time", "Source IP", "Source Port", "Destination IP", "Destination Port")
+    val flowTable = UIUtils.listingTable(flowHeaders, flowRow, slaveState.runningFlows)
+
     val content =
         <div class="row-fluid"> <!-- Slave Details -->
           <div class="span12">
@@ -62,8 +62,24 @@ private[varys] class IndexPage(parent: SlaveWebUI) {
           </div>
         </div>
 
+        <div class="row-fluid">
+          <div class="span12">
+            <h4> Running Flows </h4>
+            {flowTable}
+          </div>
+        </div>;
+
     UIUtils.basicVarysPage(content, "Varys Slave at %s:%s".format(
       slaveState.host, slaveState.port))
   }
 
+  def flowRow(flow: Flow): Seq[Node] = {
+    <tr>
+      <td>{FrameworkWebUI.formatDate(new Date(flow.startTime))}</td>
+      <td>{flow.sIP}</td>
+      <td>{flow.sPort}</td>
+      <td>{flow.dIP}</td>
+      <td>{flow.dPort}</td>
+    </tr>
+  }
 }

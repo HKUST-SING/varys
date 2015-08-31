@@ -1,22 +1,16 @@
 package varys
 
-import com.google.common.io.Files
-import com.google.common.util.concurrent.ThreadFactoryBuilder
-
 import java.io._
 import java.net._
-import java.nio.{ByteBuffer, MappedByteBuffer}
-import java.util.{Locale, Random, UUID}
-import java.util.concurrent._
 import java.util.concurrent.TimeUnit._
+import java.util.concurrent._
+import java.util.{Locale, Random}
 
-import scala.collection.mutable.ArrayBuffer
+import com.google.common.util.concurrent.ThreadFactoryBuilder
+
 import scala.collection.JavaConversions._
 import scala.io.Source
 import scala.reflect.ClassTag
-import scala.Some
-
-import sun.nio.ch.DirectBuffer
 
 /**
  * Various utility methods used by Varys.
@@ -135,7 +129,7 @@ private object Utils extends Logging {
   }
 
   /**
-   * Get only the ip and port of a SocketAddress
+   * Get only the ip of a SocketAddress
    */
   def getIPFromSocketAddress(sockAdd: SocketAddress): String = {
     val host_ip_port = sockAdd.toString

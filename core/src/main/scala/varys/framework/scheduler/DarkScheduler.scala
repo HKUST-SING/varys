@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 import scala.collection.JavaConversions._
 
+import varys.framework.Flow
 import varys.framework.master.SlaveInfo
 import varys.{Logging, Utils, VarysException}
 
@@ -161,9 +162,10 @@ private[framework] object DarkScheduler extends Logging {
             numSrcFlows.clear
             numDstFlows.clear
 
-            for ((slaveId, dsts) <- cf.flows) {          
+            for ((slaveId, flows) <- cf.flows) {          
               if (srcFree(slaveId) > 0.0) {
-                for (d <- dsts) {
+                for (flow <- flows) {
+                  val d = flow.dIP
                   if (dstFree(d) > 0.0) {
                     numSrcFlows(slaveId) += 1
                     numDstFlows(d) += 1
@@ -175,9 +177,10 @@ private[framework] object DarkScheduler extends Logging {
             srcUsed.clear
             dstUsed.clear
 
-            for ((slaveId, dsts) <- cf.flows) {          
+            for ((slaveId, flows) <- cf.flows) {          
               if (srcFree(slaveId) > 0.0) {
-                for (d <- dsts) {
+                for (flow <- flows) {
+                  val d = flow.dIP
                   if (dstFree(d) > 0.0) {
                     var minFree = math.min(srcFree(slaveId) / numSrcFlows(slaveId),
                       dstFree(d) / numDstFlows(d))

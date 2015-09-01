@@ -86,9 +86,6 @@ private[varys] class SlaveActor(
   val coflows = new ConcurrentHashMap[Int, CoflowInfo]()
   val coflowUpdated = new AtomicBoolean(false)
   
-  val ccLock = new Object
-  var currentCoflowOrder: Array[Int] = null
-
   var slaveChronicle: VanillaChronicle = null
   var slaveTailer: ExcerptTailer = null
 
@@ -221,15 +218,8 @@ private[varys] class SlaveActor(
       System.exit(1)
     }
 
-    case GlobalCoflows(coflowIds, sendTo_) => {
+    case GlobalCoflows(flowPriorityQueue) => {
       // Remember latest coflow order
-      ccLock.synchronized {
-        currentCoflowOrder = coflowIds
-      }
-
-      val newSchedule = coflowIds.mkString("-->")
-      logDebug("Received GlobalCoflows of size " + coflowIds.size + " " + newSchedule + " [" + 
-        sendTo_.mkString(" ") + "]")
 
       // Stop all
       for ((_, c) <- coflows) {
@@ -240,20 +230,15 @@ private[varys] class SlaveActor(
         }
       }
 
-      // Start some
-      var sendTo = sendTo_.toBuffer
-      for (c <- coflowIds) {
-        if (coflows.containsKey(c)) {
-          if (idToActor.containsKey(coflows(c).clientId)) {
-            idToActor(coflows(c).clientId) ! StartSome(sendTo.toArray)
-            sendTo --= coflows(c).flows.map(flow => flow.dIP)
-          } else {
-            logTrace("StartSome: idToActor doesn't contain " + coflows(c).clientId)
-          }
+      for ((_, c) <- coflows) {
+        if (idToActor.containsKey(c.clientId)) {
+          val dsts = flowPriorityQueue.filter(flow => c.flows.contains(flow)).map(flow => flow.dIP)
+          idToActor(c.clientId) ! StartSome(dsts)
         } else {
-          logTrace("StartSome: coflows doesn't contain " + c)
+          logTrace("StartSome: idToActor doesn't contain " + c.clientId)
         }
       }
+
     }
 
     case Terminated(actor) => {
@@ -289,20 +274,7 @@ private[varys] class SlaveActor(
       logDebug("Received CompletedFlow for " + flow + " of coflow " + coflowId)
       coflows(coflowId).deleteFlow(flow)
       coflowUpdated.set(true)
-
-      // Prioritize flow from the next coflow until next update
-      ccLock.synchronized {
-        breakable {
-          for (c <- currentCoflowOrder) {
-            if (c != coflowId && coflows.containsKey(c) && coflows(c).flows.contains(flow)) {
-              logDebug("Promoted " + flow.sIP + "-->" + flow.dIP + " of coflow " + c)
-              idToActor(coflows(c).clientId) ! StartSome(Array(flow.dIP))
-              break
-            }
-          }
-        }
-      }
-    }
+   }
 
     case UpdateCoflowSize(coflowId, curSize_, curRateMbps) => {
       val currentSender = sender

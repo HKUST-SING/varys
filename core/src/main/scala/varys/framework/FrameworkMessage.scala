@@ -37,8 +37,7 @@ private[varys] case class RegisterSlaveFailed(
   extends FrameworkMessage
 
 private[varys] case class GlobalCoflows(
-    coflows: Array[Int],
-    sendTo: Array[String])
+    flowPriorityQueue: Array[Flow])
   extends FrameworkMessage
 
 // Client to Master

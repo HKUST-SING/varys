@@ -393,10 +393,13 @@ private[varys] class Master(
       val (slaveAllocs, arrCoflows) = DarkScheduler.getSchedule(idToSlave.keys.toSeq.toArray)
       val newOrder = arrCoflows.mkString("->")
       for ((slaveId, sendTo) <- slaveAllocs) {
-        if (!idToSlave(slaveId).sameAsLastSchedule(newOrder, sendTo)) {
+        val slave = idToSlave(slaveId)
+        if (!slave.sameAsLastSchedule(newOrder, sendTo)) {
           logDebug("Sending new schedule to " + slaveId + " => " + sendTo.mkString("|") + 
             " => " + newOrder)
-          idToSlaveActor(slaveId) ! GlobalCoflows(arrCoflows, sendTo.toArray)
+          val flowPriorityQueue = arrCoflows.map(c => slave.coflowIds.indexOf(c))
+                                            .flatMap(idx => slave.flows(idx).filter(flow => sendTo.contains(flow.dIP)))
+          idToSlaveActor(slaveId) ! GlobalCoflows(flowPriorityQueue)
           sentSomething = true
         }
       }

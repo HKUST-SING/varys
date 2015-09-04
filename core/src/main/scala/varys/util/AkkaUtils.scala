@@ -81,7 +81,9 @@ private[varys] object AkkaUtils {
             kryo-trace = false
 
             classes = [
+              "java.util.Date",
               "varys.framework.Flow",
+              "[Lvarys.framework.Flow;",
               "[[Lvarys.framework.Flow;",
               "varys.framework.RegisterSlave",  
               "varys.framework.Heartbeat",

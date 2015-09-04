@@ -75,7 +75,7 @@ private[varys] class IndexPage(parent: SlaveWebUI) {
 
   def flowRow(flow: Flow): Seq[Node] = {
     <tr>
-      <td>{FrameworkWebUI.formatDate(new Date(flow.startTime))}</td>
+      <td>{FrameworkWebUI.formatDate(flow.startTime)}</td>
       <td>{flow.sIP}</td>
       <td>{flow.sPort}</td>
       <td>{flow.dIP}</td>

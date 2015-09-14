@@ -17,3 +17,5 @@ logs/
 conf/varys-env.sh
 conf/java-opts
 conf/log4j.properties
+conf/masters
+conf/slaves

@@ -230,10 +230,12 @@ private[varys] class SlaveActor(
         }
       }
 
+      val sentDsts = ArrayBuffer[String]()
       for ((_, c) <- coflows) {
         if (idToActor.containsKey(c.clientId)) {
           val dsts = flowPriorityQueue.filter(flow => c.flows.contains(flow)).map(flow => flow.dIP)
-          idToActor(c.clientId) ! StartSome(dsts)
+          idToActor(c.clientId) ! StartSome(dsts.filter(dst => !sentDsts.contains(dst)))
+          sentDsts ++= dsts
         } else {
           logTrace("StartSome: idToActor doesn't contain " + c.clientId)
         }

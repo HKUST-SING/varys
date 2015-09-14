@@ -395,11 +395,14 @@ private[varys] class Master(
       for ((slaveId, sendTo) <- slaveAllocs) {
         val slave = idToSlave(slaveId)
         if (!slave.sameAsLastSchedule(newOrder, sendTo)) {
-          logDebug("Sending new schedule to " + slaveId + " => " + sendTo.mkString("|") + 
-            " => " + newOrder)
-          val flowPriorityQueue = arrCoflows.map(c => slave.coflowIds.indexOf(c))
-                                            .flatMap(idx => slave.flows(idx).filter(flow => sendTo.contains(flow.dIP)))
-          idToSlaveActor(slaveId) ! GlobalCoflows(flowPriorityQueue)
+          logDebug("Sending new schedule to " + slaveId + " => " + sendTo.mkString("|") + " => " + newOrder)
+          val coflowIdx = {
+            arrCoflows.map(c => slave.coflowIds.indexOf(c)).filter(i => i >= 0)
+          }
+          val flowPriorityQueue = {
+            coflowIdx.flatMap(idx => slave.flows(idx).filter(flow => sendTo.contains(flow.dIP)))
+          }
+          idToSlaveActor(slaveId) ! GlobalCoflows(flowPriorityQueue.toArray)
           sentSomething = true
         }
       }

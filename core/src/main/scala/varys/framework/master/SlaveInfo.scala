@@ -41,9 +41,9 @@ private[varys] class SlaveInfo(
   }
 
   var numCoflows = 0
-  var coflowIds: Array[Int] = null
-  var sizes: Array[Long] = null
-  var flows: Array[Array[Flow]] = null
+  var coflowIds = Array[Int]()
+  var sizes = Array[Long]()
+  var flows = Array[Array[Flow]]()
 
   def updateCoflows(
       coflowIds_ : Array[Int], 

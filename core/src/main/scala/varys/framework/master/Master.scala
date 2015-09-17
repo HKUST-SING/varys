@@ -120,6 +120,8 @@ private[varys] object Master {
 
       Utils.scheduleDaemonAtFixedRate(0, REMOTE_SYNC_PERIOD_MILLIS) {
 
+        val start = System.currentTimeMillis
+
         implicit val timeout = Timeout(20.millis)
         val results = ipToSlave.map({
           case (ip, actor) => Future {
@@ -134,6 +136,8 @@ private[varys] object Master {
           }
         }).flatMap(Await.result(_, timeout.duration))
 
+        val phase1 = System.currentTimeMillis
+
         coflows = results.flatMap(_.coflows).groupBy(_._1).map({
           case (k, vs) => (k, vs.map(_._2).reduce(_ ++ _))
         })
@@ -143,6 +147,8 @@ private[varys] object Master {
         flowClusters = cluster.map({
           case (k, fs) => (k, fs.map(f => (f, flowSize(f))).toMap)
         })
+
+        val phase2 = System.currentTimeMillis
 
         val scores = coflows.map({ case (coflowId, flowSizes) =>
           val trueCluster = flowSizes.keys.toSet
@@ -164,9 +170,19 @@ private[varys] object Master {
         })
         logInfo("Identification scores: " + scores)
 
+        val phase3 = System.currentTimeMillis
+
         getSchedule(ipToSlave.keys.toArray, coflows).foreach({
           case (ip, flows) => ipToSlave(ip) ! StartSome(flows)
         })
+
+        val phase4 = System.currentTimeMillis
+
+        logInfo("[Scheduler] "
+          + "sync: " + (phase1 - start) + " ms, "
+          + "cluster: " + (phase2 - phase1) + " ms, "
+          + "score: " + (phase3 - phase2) + " ms, "
+          + "schedule: " + (phase4 - phase3))
       }
     }
 

@@ -22,7 +22,8 @@ private[varys] object Slave {
   val host = InetAddress.getLocalHost.getHostName
   val port = Option(System.getenv("VARYS_SLAVE_PORT")).getOrElse("1607").toInt
   val masterIp = Option(System.getenv("VARYS_MASTER_IP")).getOrElse("localhost")
-  val masterUrl = "varys://" + masterIp + ":" + port;
+  val masterPort = Option(System.getenv("VARYS_MASTER_PORT")).getOrElse("1606")
+  val masterUrl = "varys://" + masterIp + ":" + masterPort;
 
   private val systemName = "varysSlave"
   private val actorName = "Slave"
@@ -40,7 +41,7 @@ private[varys] object Slave {
       case varysUrlRegex(ip, p) =>
         "akka.tcp://%s@%s:%s/user/%s".format(systemName, ip, p, actorName)
       case _ =>
-        throw new VarysException("Invalid master URL: " + varysUrl)
+        throw new VarysException("Invalid slave URL: " + varysUrl)
     }
   }
 
@@ -51,7 +52,7 @@ private[varys] object Slave {
     var flowQueue = mutable.Queue[Flow]()
 
     override def preStart() = {
-      context.actorSelection(Master.toAkkaUrl(masterUrl)).resolveOne(10.seconds).onComplete {
+      context.actorSelection(Master.toAkkaUrl(masterUrl)).resolveOne(1.second).onComplete {
         case Success(actor) =>
           actor ! RegisterSlave(host)
           logInfo("Starting Varys slave %s:%d".format(host, port))

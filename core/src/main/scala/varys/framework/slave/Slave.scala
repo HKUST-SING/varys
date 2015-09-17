@@ -1,424 +1,132 @@
 package varys.framework.slave
 
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic._
+import java.net.InetAddress
 
 import akka.actor._
-import akka.remote.{DisassociatedEvent, RemotingLifecycleEvent}
-import net.openhft.chronicle.{ExcerptTailer, VanillaChronicle}
-import org.hyperic.sigar.{Sigar, SigarException}
+import akka.pattern.ask
+import akka.util.Timeout
 import varys.framework._
 import varys.framework.master.Master
-import varys.framework.slave.ui.SlaveWebUI
 import varys.util._
-import varys.{Logging, Utils, VarysException}
+import varys.{Logging, VarysException}
 
-import scala.collection.JavaConversions._
-import scala.collection.mutable.ArrayBuffer
-import scala.util.control.Breaks._
-
-private[varys] class SlaveActor(
-    ip: String,
-    port: Int,
-    webUiPort: Int,
-    commPort: Int,
-    masterUrl: String,
-    workDirPath: String = null)
-  extends Actor with Logging {
-
-  case class CoflowInfo(
-      val coflowId: Int,
-      var curSize: Long) {
-
-    val flows = new ArrayBuffer[Flow]()
-
-    var lastUpdatedTime = System.currentTimeMillis
-
-    var clientId: String = null
-
-    def updateSize(curSize_ : Long) {
-      curSize = curSize_
-      lastUpdatedTime = System.currentTimeMillis
-    }
-
-    def addFlow(flow: Flow) {
-      flows += flow
-    }
-
-    def deleteFlow(flow: Flow) {
-      flows -= flow
-    }
-
-    // Rate measurements
-    var lastPrintTime = 0L
-    var lastPrintSize = 0L
-    var lastPrintRate = 0L
-  }
-
-  val HEARTBEAT_SEC = System.getProperty("varys.framework.heartbeat", "1").toInt
-  val REMOTE_SYNC_PERIOD_MILLIS = System.getProperty("varys.framework.remoteSyncPeriod", "80").toInt
-
-  val DATE_FORMAT = new SimpleDateFormat("yyyyMMddHHmmss")  // For slave IDs
-
-  var master: ActorRef = null
-  var masterAddress: Address = null
-  
-  var masterWebUiUrl : String = ""
-  val slaveId = generateSlaveId()
-  var varysHome: File = null
-  var workDir: File = null
-  val publicAddress = {
-    val envVar = System.getenv("VARYS_PUBLIC_DNS")
-    if (envVar != null) envVar else ip
-  }
-  var webUi: SlaveWebUI = null
-
-  var nextClientNumber = new AtomicInteger()
-  val idToClient = new ConcurrentHashMap[String, ClientInfo]()
-  val actorToClient = new ConcurrentHashMap[ActorRef, ClientInfo]()
-  val addressToClient = new ConcurrentHashMap[Address, ClientInfo]()
-  val idToActor = new ConcurrentHashMap[String, ActorRef]()
-  val idToAppender = new ConcurrentHashMap[String, VanillaChronicle.VanillaAppender]()
-
-  val coflows = new ConcurrentHashMap[Int, CoflowInfo]()
-  val coflowUpdated = new AtomicBoolean(false)
-  
-  var slaveChronicle: VanillaChronicle = null
-  var slaveTailer: ExcerptTailer = null
-
-  var sigar = new Sigar()
-  var lastRxBytes = -1.0
-  var lastTxBytes = -1.0
-  
-  var curRxBps = 0.0
-  var curTxBps = 0.0
-
-  private def now() = System.currentTimeMillis
-
-  override def preStart() {
-    logInfo("Starting Varys slave %s:%d".format(ip, port))
-    varysHome = new File(Option(System.getenv("VARYS_HOME")).getOrElse("."))
-    logInfo("Varys home: " + varysHome)
-    webUi = new SlaveWebUI(this, workDir, Some(webUiPort))
-
-    webUi.start()
-    connectToMaster()
-
-    // Chronicle preStart
-    HFTUtils.cleanWorkDir
-    slaveChronicle = new VanillaChronicle(HFTUtils.HFT_LOCAL_SLAVE_PATH)
-    slaveTailer = slaveChronicle.createTailer()
-
-    // Thread for reading chronicle input
-    val someThread = new Thread(new Runnable() { 
-      override def run() {
-        while (true) {
-          while (slaveTailer.nextIndex) {
-            val msgType = slaveTailer.readInt()
-            msgType match {
-              case HFTUtils.UpdateCoflowSize => {
-                val cf = slaveTailer.readInt
-                val cs = slaveTailer.readLong
-                val rm = slaveTailer.readLong
-                self ! UpdateCoflowSize(cf, cs, rm)
-              }
-            }
-            slaveTailer.finish
-          }
-          Thread.sleep(1)
-        }
-      }
-    })
-    someThread.setDaemon(true)
-    someThread.start()
-
-    // Thread for periodically printing coflow rates
-    Utils.scheduleDaemonAtFixedRate(0, HEARTBEAT_SEC * 1000) {
-      var totalRate = 0L
-      for ((_, c) <- coflows) {
-        var rate = (c.curSize - c.lastPrintSize) / (System.currentTimeMillis - c.lastPrintTime) / 128
-        rate = (c.lastPrintRate * 0.2 + rate * 0.8).toLong
-        totalRate += rate.toLong
-        logDebug(c.coflowId + " => " + rate + " Mbps")
-        c.lastPrintSize = c.curSize
-        c.lastPrintTime = System.currentTimeMillis
-        c.lastPrintRate = rate
-      }
-      logDebug("TOTAL => " + totalRate + " Mbps")
-    }     
-  }
-
-  override def postStop() {
-    webUi.stop()
-  }
-
-  def connectToMaster() {
-    logInfo("Connecting to master " + masterUrl)
-    try {
-      master = AkkaUtils.getActorRef(Master.toAkkaUrl(masterUrl), context)
-      masterAddress = master.path.address
-      master ! RegisterSlave(slaveId, ip, port, webUi.boundPort.get, commPort, publicAddress)
-      context.system.eventStream.subscribe(self, classOf[RemotingLifecycleEvent])
-    } catch {
-      case e: Exception =>
-        logError("Failed to connect to master", e)
-        System.exit(1)
-    }
-  }
-
-  override def receive = {
-    case RegisterSlaveClient(coflowId, clientName, host, commPort) => {
-      val currentSender = sender
-      val st = now
-      logDebug("Registering client %s@%s:%d".format(clientName, host, commPort))
-      
-      val client = addClient(clientName, host, commPort, currentSender)
-      
-      if (!coflows.containsKey(coflowId)) {
-        coflows(coflowId) = CoflowInfo(coflowId, 0)
-      }
-      coflows(coflowId).clientId = client.id
-      
-      currentSender ! RegisteredSlaveClient(client.id)
-      
-      logInfo("Registered client " + clientName + " with ID " + client.id + " in " + 
-        (now - st) + " milliseconds")
-    }
-
-    case RegisteredSlave(url) => {
-      masterWebUiUrl = url
-      logInfo("Successfully registered with master")
-
-      // Do not send stats by default
-      val sendStats = System.getProperty("varys.slave.sendStats", "false").toBoolean
-      if (sendStats) {
-        // Thread to periodically update last{Rx|Tx}Bytes
-        Utils.scheduleDaemonAtFixedRate(0, HEARTBEAT_SEC * 1000) {
-          updateNetStats()
-          master ! Heartbeat(slaveId, curRxBps, curTxBps)
-        }
-      }
-
-      // Thread for periodically updating coflow sizes to master
-      Utils.scheduleDaemonAtFixedRate(REMOTE_SYNC_PERIOD_MILLIS, REMOTE_SYNC_PERIOD_MILLIS) {
-        if (coflows.size > 0 && coflowUpdated.getAndSet(false)) {
-          logTrace("Sending LocalCoflows with " + coflows.size + " coflows")
-          val activeCoflows = coflows.filter(_._2.flows.size > 0)
-          master ! LocalCoflows(slaveId, activeCoflows.map(_._2.coflowId).toArray, 
-            activeCoflows.map(_._2.curSize).toArray, activeCoflows.map(_._2.flows.toArray).toArray)
-        }
-      } 
-    }
-
-    case RegisterSlaveFailed(message) => {
-      logError("Slave registration failed: " + message)
-      System.exit(1)
-    }
-
-    case GlobalCoflows(flowPriorityQueue) => {
-      // Remember latest coflow order
-
-      // Stop all
-      for ((_, c) <- coflows) {
-        if (idToActor.containsKey(c.clientId)) {
-          idToActor(c.clientId) ! PauseAll
-        } else {
-          logTrace("PauseAll: idToActor doesn't contain " + c.clientId)
-        }
-      }
-
-      val sentDsts = ArrayBuffer[String]()
-      for ((_, c) <- coflows) {
-        if (idToActor.containsKey(c.clientId)) {
-          val dsts = flowPriorityQueue.filter(flow => c.flows.contains(flow)).map(flow => flow.dIP)
-          idToActor(c.clientId) ! StartSome(dsts.filter(dst => !sentDsts.contains(dst)))
-          sentDsts ++= dsts
-        } else {
-          logTrace("StartSome: idToActor doesn't contain " + c.clientId)
-        }
-      }
-
-    }
-
-    case Terminated(actor) => {
-      if (actor == master) {
-        masterDisconnected()
-      }
-      if (actorToClient.containsKey(actor))  
-        removeClient(actorToClient.get(actor))
-    }
-
-    case e: DisassociatedEvent => {
-      if (e.remoteAddress == masterAddress) {
-        masterDisconnected()
-      }
-      if (addressToClient.containsKey(e.remoteAddress))  
-        removeClient(addressToClient.get(e.remoteAddress))
-    }
-    
-    case RequestSlaveState => {
-      val runningFlows = coflows.values.flatMap(coflow => coflow.flows).toArray
-      sender ! SlaveState(ip, port, slaveId, masterUrl, curRxBps, curTxBps, runningFlows.toArray, masterWebUiUrl)
-    }
-    
-    case StartedFlow(coflowId, flow) => {
-      val currentSender = sender
-      logDebug("Received StartedFlow for " + flow + " of coflow " + coflowId)
-      coflows(coflowId).addFlow(flow)
-      coflowUpdated.set(true)
-    }
-
-    case CompletedFlow(coflowId, flow) => {
-      val currentSender = sender
-      logDebug("Received CompletedFlow for " + flow + " of coflow " + coflowId)
-      coflows(coflowId).deleteFlow(flow)
-      coflowUpdated.set(true)
-   }
-
-    case UpdateCoflowSize(coflowId, curSize_, curRateMbps) => {
-      val currentSender = sender
-      
-      if (coflows.containsKey(coflowId)) {
-        coflows(coflowId).updateSize(curSize_)
-      } else {
-        coflows(coflowId) = CoflowInfo(coflowId, curSize_)
-      }
-      coflowUpdated.set(true)
-    }
-
-    case UnregisteredCoflow(coflowId) => {
-      logDebug("Removing " + coflowId)
-      coflows -= coflowId
-    }
-  }
-
-  def masterDisconnected() {
-    // TODO: It would be nice to try to reconnect to the master, but just shut down for now.
-    // (Note that if reconnecting we would also need to assign IDs differently.)
-    logError("Connection to master failed! Shutting down.")
-    System.exit(1)
-  }
-
-  def addClient(clientName: String, host: String, commPort: Int, actor: ActorRef): ClientInfo = {
-    val date = new Date(now)
-    val client = new ClientInfo(now, newClientId, host, commPort, date, actor)
-    idToClient.put(client.id, client)
-    actorToClient(actor) = client
-    addressToClient(actor.path.address) = client
-    idToActor(client.id) = actor
-    idToAppender(client.id) = (new VanillaChronicle(HFTUtils.createWorkDirPath(client.id))).createAppender()
-    client
-  }
-
-  def removeClient(client: ClientInfo) {
-    if (client != null && idToClient.containsValue(client)) {
-      logTrace("Removing " + client)
-      idToClient.remove(client.id)
-      actorToClient -= client.actor
-      addressToClient -= client.actor.path.address
-      idToActor -= client.id
-      client.markFinished()
-    }
-  }
-
-  def newClientId(): String = {
-    "CLIENT-%06d".format(nextClientNumber.getAndIncrement())
-  }
-
-  def generateSlaveId(): String = {
-    "slave-%s-%s-%d".format(DATE_FORMAT.format(new Date), ip, port)
-  }
-  
-  /**
-   * Update last{Rx|Tx}Bytes before each heartbeat
-   * Return the pair (rxBps, txBps)
-   */
-  def updateNetStats() = {
-    var curRxBytes = 0.0;
-    var curTxBytes = 0.0;
-    
-    try {
-      val netIfs = sigar.getNetInterfaceList()
-      for (i <- 0 until netIfs.length) {
-        val net = sigar.getNetInterfaceStat(netIfs(i))
-      
-        val r = net.getRxBytes()
-        if (r >= 0) {
-          curRxBytes += r
-        }
-      
-        val t = net.getTxBytes()
-        if (t >= 0.0) {
-          curTxBytes += t
-        }
-      }
-    } catch {
-      case se: SigarException => {
-        println(se)
-      }
-    }
-    
-    var rxBps = 0.0
-    var txBps = 0.0
-    if (lastRxBytes >= 0.0 && lastTxBytes >= 0.0) {
-      rxBps = (curRxBytes - lastRxBytes) / HEARTBEAT_SEC;
-      txBps = (curTxBytes - lastTxBytes) / HEARTBEAT_SEC;
-    } 
-    
-    lastRxBytes = curRxBytes
-    lastTxBytes = curTxBytes
-    
-    curRxBps = rxBps
-    curTxBps = txBps
-
-    // FIXME: Sometimes Sigar stops responding, and printing something here brings it back!!!
-    // This bug also causes Slave actors to stop responding, which causes the client failures.
-    logInfo(rxBps + " " + txBps)
-  }
-}
+import scala.collection.concurrent.TrieMap
+import scala.collection.mutable
+import scala.concurrent.{TimeoutException, Future, Await}
+import scala.util.{Success, Failure}
+import scala.concurrent.duration._
+import scala.concurrent.ExecutionContext.Implicits.global
 
 private[varys] object Slave {
+
+  val host = InetAddress.getLocalHost.getHostName
+  val port = Option(System.getenv("VARYS_SLAVE_PORT")).getOrElse("1607").toInt
+  val masterIp = Option(System.getenv("VARYS_MASTER_IP")).getOrElse("localhost")
+  val masterUrl = "varys://" + masterIp + ":" + port;
+
   private val systemName = "varysSlave"
   private val actorName = "Slave"
-  private val varysUrlRegex = "varys://([^:]+):([0-9]+)".r
 
   def main(argStrings: Array[String]) {
-    val args = new SlaveArguments(argStrings)
-    val (actorSystem, _) = startSystemAndActor(args.ip, args.port, args.webUiPort, args.commPort,
-      args.master, args.workDir)
+    val (actorSystem, _) = AkkaUtils.createActorSystem(systemName, host, port)
+    actorSystem.actorOf(Props(new SlaveActor), name = actorName)
+
     actorSystem.awaitTermination()
   }
 
-  /** 
-   * Returns an `akka.tcp://...` URL for the Slave actor given a varysUrl `varys://host:ip`. 
-   */
   def toAkkaUrl(varysUrl: String): String = {
+    val varysUrlRegex = "varys://([^:]+):([0-9]+)".r
     varysUrl match {
-      case varysUrlRegex(host, port) =>
-        "akka.tcp://%s@%s:%s/user/%s".format(systemName, host, port, actorName)
+      case varysUrlRegex(ip, p) =>
+        "akka.tcp://%s@%s:%s/user/%s".format(systemName, ip, p, actorName)
       case _ =>
         throw new VarysException("Invalid master URL: " + varysUrl)
     }
   }
 
-  def startSystemAndActor(
-      host: String, 
-      port: Int, 
-      webUiPort: Int, 
-      commPort: Int,
-      masterUrl: String, 
-      workDir: String, 
-      slaveNumber: Option[Int] = None): (ActorSystem, Int) = {
-    
-    // The LocalVarysCluster runs multiple local varysSlaveX actor systems
-    val systemName = "varysSlave" + slaveNumber.map(_.toString).getOrElse("")
-    val (actorSystem, boundPort) = AkkaUtils.createActorSystem(systemName, host, port)
-    val actor = actorSystem.actorOf(Props(new SlaveActor(host, boundPort, webUiPort, commPort,
-      masterUrl, workDir)), name = "Slave")
-    (actorSystem, boundPort)
+  private[varys] class SlaveActor extends Actor with Logging {
+
+    val flowToActor = TrieMap[Flow, ActorRef]()
+
+    var flowQueue = mutable.Queue[Flow]()
+
+    override def preStart() = {
+      context.actorSelection(Master.toAkkaUrl(masterUrl)).resolveOne(10.seconds).onComplete {
+        case Success(actor) =>
+          actor ! RegisterSlave(host)
+          logInfo("Starting Varys slave %s:%d".format(host, port))
+        case Failure(e) =>
+          logError("Cannot connect to master; exiting")
+          sys.exit(1)
+      }
+    }
+
+    override def receive = {
+
+      case RegisterClient(flow) =>
+        flowToActor += flow -> sender
+
+      case FlowCompleted(flow) =>
+        flowToActor -= flow
+
+        implicit val timeout = Timeout(1.millis)
+        if (flowQueue.nonEmpty) {
+          val f = flowQueue.dequeue()
+          val actor = flowToActor(f)
+          try {
+            val reply = (actor ? Start).mapTo[Unit]
+            Await.result(reply, timeout.duration)
+          } catch {
+            case e: TimeoutException =>
+              self.tell(FlowCompleted(f), actor)
+          }
+        }
+
+      case StartSome(flows) =>
+
+        for (actor <- flowToActor.values) {
+          actor ! Pause
+        }
+
+        flowQueue = mutable.Queue[Flow]() ++ flows
+
+        implicit val timeout = Timeout(1.millis)
+        if (flowQueue.nonEmpty) {
+          val f = flowQueue.dequeue()
+          val actor = flowToActor(f)
+          try {
+            val reply = (actor ? Start).mapTo[Unit]
+            Await.result(reply, timeout.duration)
+          } catch {
+            case e: TimeoutException =>
+              self.tell(FlowCompleted(f), actor)
+          }
+        }
+
+      case GetLocalCoflows =>
+
+        implicit val timeout = Timeout(1.millis)
+        val results = flowToActor.map({
+          case (flow, actor) => Future {
+            try {
+              val reply = (actor ? GetFlowSize).mapTo[FlowSize]
+              Some(Await.result(reply, timeout.duration))
+            } catch {
+              case e: TimeoutException =>
+                self.tell(FlowCompleted(flow), actor)
+                None
+            }
+          }
+        }).flatMap(Await.result(_, timeout.duration))
+
+        val coflows = results.groupBy(_.coflowId).map({
+          case (coflowId, flowSizes) =>
+            (coflowId, flowSizes.map(fs => (fs.flow, fs.bytesWritten)).toMap)
+        })
+
+        logDebug("Sending LocalCoflows with " + coflows.size + " coflows")
+        sender ! LocalCoflows(coflows)
+    }
   }
 
 }

@@ -49,10 +49,10 @@ private[varys] object AkkaUtils {
             # fsm = on
             # event-stream = on
           }
-         
+
           provider = "akka.remote.RemoteActorRefProvider"
 
-          serializers {  
+          serializers {
             java = "akka.serialization.JavaSerializer"
             kryo = "com.romix.akka.serialization.kryo.KryoSerializer"
           }
@@ -64,8 +64,8 @@ private[varys] object AkkaUtils {
 
           # Details of configuration params is at https://github.com/romix/akka-kryo-serialization
           kryo {
-            type = "graph"  
-            idstrategy = "incremental"  
+            type = "graph"
+            idstrategy = "incremental"
 
             # Define a default size for serializer pool
             # Try to define the size to be at least as big as the max possible number
@@ -74,54 +74,22 @@ private[varys] object AkkaUtils {
             serializer-pool-size = 32
 
             # Define a default size for byte buffers used during serialization
-            buffer-size = 65536  
+            buffer-size = 65536
 
             use-manifests = false
-            implicit-registration-logging = false 
+            implicit-registration-logging = false
             kryo-trace = false
 
             classes = [
-              "java.util.Date",
-              "varys.framework.Flow",
-              "[Lvarys.framework.Flow;",
-              "[[Lvarys.framework.Flow;",
-              "varys.framework.RegisterSlave",  
-              "varys.framework.Heartbeat",
+              "varys.framework.GetLocalCoflows",
               "varys.framework.LocalCoflows",
-              "varys.framework.RegisteredSlave",
-              "varys.framework.RegisterSlaveFailed",
-              "varys.framework.GlobalCoflows",
-              "varys.framework.RegisterMasterClient",
-              "varys.framework.RegisterSlaveClient",
-              "varys.framework.RegisterCoflow",
-              "varys.framework.RegisterCoflowFailed",
-              "varys.framework.RejectedCoflow",
-              "varys.framework.UnregisterCoflow",
-              "varys.framework.RequestBestRxMachines",
-              "varys.framework.RequestBestTxMachines",
-              "varys.framework.RegisteredMasterClient",
-              "varys.framework.RegisteredSlaveClient",
-              "varys.framework.CoflowKilled",
-              "varys.framework.RegisterClientFailed",
-              "varys.framework.RegisteredCoflow",
-              "varys.framework.UnregisteredCoflow",
-              "varys.framework.BestRxMachines",
-              "varys.framework.BestTxMachines",
-              "varys.framework.StartedFlow",
-              "varys.framework.CompletedFlow",
-              "varys.framework.UpdateCoflowSize",
+              "varys.framework.RegisterSlave",
               "varys.framework.StartSome",
-              "varys.framework.CoflowDescription",
-              "varys.framework.CoflowType$",
-              "varys.framework.FlowDescription",
-              "varys.framework.DataIdentifier",
-              "varys.framework.DataType$",
-              "scala.collection.immutable.Map$Map1",
-              "scala.collection.immutable.Map$Map2",
-              "scala.collection.immutable.Map$Map3",
-              "scala.collection.immutable.Map$Map4",
-              "scala.collection.immutable.HashMap$HashTrieMap"
-            ]  
+              "varys.framework.GetFlowSize",
+              "varys.framework.RegisterClient",
+              "varys.framework.Pause",
+              "varys.framework.Start",
+            ]
           }
         }
       }
@@ -141,17 +109,17 @@ private[varys] object AkkaUtils {
       akka.remote.log-received-messages = %s
       akka.remote.netty.write-timeout = %ds
       """.format(
-        logLevel, 
-        logLevel, 
-        host, 
-        port, 
-        akkaTimeout, 
-        akkaFrameSize, 
-        akkaThreads, 
+        logLevel,
+        logLevel,
+        host,
+        port,
+        akkaTimeout,
+        akkaFrameSize,
+        akkaThreads,
         akkaBatchSize,
-        lifecycleEvents, 
-        logRemoteEvents, 
-        logRemoteEvents, 
+        lifecycleEvents,
+        logRemoteEvents,
+        logRemoteEvents,
         akkaWriteTimeout))
 
     val actorSystem = ActorSystem(name, akkaConf)
@@ -162,44 +130,4 @@ private[varys] object AkkaUtils {
     val boundPort = provider.getDefaultAddress.port.get
     return (actorSystem, boundPort)
   }
-
-  /** 
-   * Send a one-way message to an actor, to which we expect it to reply with true. 
-   */
-  def tellActor(actor: ActorRef, message: Any) {
-    if (!askActorWithReply[Boolean](actor, message)) {
-      throw new VarysException(actor + " returned false, expected true.")
-    }
-  }
-
-  /**
-   * Send a message to an actor and get its result within a default timeout, or
-   * throw a VarysException if this fails.
-   */
-  def askActorWithReply[T](actor: ActorRef, message: Any, timeout: Int = AKKA_TIMEOUT_MS): T = {
-    if (actor == null) {
-      throw new VarysException("Error sending message as the actor is null " + "[message = " + 
-        message + "]")
-    }
-    
-    try {
-      val future = actor.ask(message)(timeout.millis)
-      val result = Await.result(future, timeout.millis)
-      if (result == null) {
-        throw new Exception(actor + " returned null")
-      }
-      return result.asInstanceOf[T]
-    } catch {
-      case ie: InterruptedException => throw ie
-      case e: Exception => {
-        throw new VarysException(
-          "Error sending message to " + actor + " [message = " + message + "]", e)
-      }
-    }
-  }
-
-  def getActorRef(url: String, context: ActorContext): ActorRef = {
-    val timeout = AKKA_TIMEOUT_MS.millis
-    Await.result(context.actorSelection(url).resolveOne(timeout), timeout)
-  }  
 }

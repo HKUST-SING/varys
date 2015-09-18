@@ -23,17 +23,20 @@ class VarysOutputStream(val sock: Socket,
                         val coflowId: String)
   extends OutputStream() with Logging {
 
+  val host = InetAddress.getLocalHost.getHostAddress
   val flow = new Flow(sock.getLocalAddress.getHostAddress, sock.getLocalPort,
     sock.getInetAddress.getHostAddress, sock.getPort)
 
-  val clientName = flow.sIP + "@" + System.currentTimeMillis.toString
-  val (actorSystem, _) = AkkaUtils.createActorSystem(clientName, flow.sIP, 0)
+  val clientName = flow.sIP.replace(".", "-") + "-" + System.currentTimeMillis
+  val (actorSystem, _) = AkkaUtils.createActorSystem(clientName, host, 0)
   val clientActor = actorSystem.actorOf(Props(new VarysOutputStreamActor))
 
   val rawStream = sock.getOutputStream
   val canProceed = new AtomicBoolean(true)
   val canProceedLock = new Object
   var bytesWritten = 0L
+
+  val closed = new AtomicBoolean(false)
 
   override def write(b: Int) = synchronized {
     preWrite()
@@ -65,14 +68,30 @@ class VarysOutputStream(val sock: Socket,
     bytesWritten += writeLen
   }
 
+  override def close() {
+    closed.set(true)
+    clientActor ! FlowCompleted(flow)
+    rawStream.close()
+  }
+
   private[client] class VarysOutputStreamActor extends Actor with Logging {
 
     val port = Option(System.getenv("VARYS_SLAVE_PORT")).getOrElse("1607").toInt
-    val slaveUrl = "varys://" + flow.sIP + ":" + port
+    val slaveUrl = "varys://" + host + ":" + port
 
-    context.actorSelection(Slave.toAkkaUrl(slaveUrl)).resolveOne(1.millis).onComplete {
-      case Success(actor) => actor ! RegisterClient(flow)
-      case Failure(e) => logDebug("Cannot connect to slave due to " + e + "; fallback to non-blocking mode")
+    var slave: ActorRef = null
+    val slaveLock = new Object
+
+    context.actorSelection(Slave.toAkkaUrl(slaveUrl)).resolveOne(1.second).onComplete {
+      case Success(actor) => {
+        if (!closed.get) {
+          slaveLock.synchronized {
+            slave = actor
+            slave ! RegisterClient(flow)
+          }
+        }
+      }
+      case Failure(_) => logDebug("Cannot connect to slave; fallback to non-blocking mode")
     }
 
     override def receive = {
@@ -81,12 +100,19 @@ class VarysOutputStream(val sock: Socket,
 
       case Start =>
         canProceed.set(true)
-        canProceedLock.notifyAll()
-        sender ! ()
+        canProceedLock.synchronized {
+          canProceedLock.notifyAll()
+        }
 
       case GetFlowSize =>
         sender ! FlowSize(coflowId, flow, bytesWritten)
+
+      case FlowCompleted(flow) =>
+        slaveLock.synchronized {
+          if (slave != null) {
+            slave ! FlowCompleted(flow)
+          }
+        }
     }
   }
-
 }

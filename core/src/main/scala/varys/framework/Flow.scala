@@ -7,5 +7,5 @@ case class Flow(sIP: String,
                 dIP: String,
                 dPort: Int) extends Serializable {
 
-  val startTime = new Date(System.currentTimeMillis)
+  val startTime = System.currentTimeMillis
 }

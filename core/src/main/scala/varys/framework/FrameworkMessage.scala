@@ -2,6 +2,8 @@ package varys.framework
 
 private[varys] sealed trait FrameworkMessage extends Serializable
 
+private[varys] object MergeAndSync
+
 // Slave <-> Master
 private[varys] case object GetLocalCoflows
 

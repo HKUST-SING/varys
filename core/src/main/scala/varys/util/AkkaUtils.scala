@@ -29,7 +29,7 @@ private[varys] object AkkaUtils {
     val akkaBatchSize = System.getProperty("varys.akka.batchSize", "15").toInt
     val akkaTimeout = System.getProperty("varys.akka.timeout", "60").toInt
     val akkaFrameSize = System.getProperty("varys.akka.frameSize", "10").toInt * 1048576
-    val logLevel = System.getProperty("varys.akka.logLevel", "ERROR")
+    val logLevel = System.getProperty("varys.akka.logLevel", "OFF")
     val lifecycleEvents = if (System.getProperty("varys.akka.logLifecycleEvents", "false").toBoolean) "on" else "off"
     val logRemoteEvents = if (System.getProperty("varys.akka.logRemoteEvents", "false").toBoolean) "on" else "off"
     val akkaWriteTimeout = System.getProperty("varys.akka.writeTimeout", "30").toInt
@@ -77,18 +77,28 @@ private[varys] object AkkaUtils {
             buffer-size = 65536
 
             use-manifests = false
-            implicit-registration-logging = false
+            implicit-registration-logging = true
             kryo-trace = false
 
             classes = [
+              "varys.framework.Flow",
+              "[Lvarys.framework.Flow;",
               "varys.framework.GetLocalCoflows",
               "varys.framework.LocalCoflows",
               "varys.framework.RegisterSlave",
               "varys.framework.StartSome",
               "varys.framework.GetFlowSize",
+              "varys.framework.FlowSize",
               "varys.framework.RegisterClient",
+              "varys.framework.FlowCompleted",
               "varys.framework.Pause",
               "varys.framework.Start",
+              "scala.collection.immutable.Map$EmptyMap$",
+              "scala.collection.immutable.Map$Map1",
+              "scala.collection.immutable.Map$Map2",
+              "scala.collection.immutable.Map$Map3",
+              "scala.collection.immutable.Map$Map4",
+              "scala.collection.immutable.HashMap$HashTrieMap",
             ]
           }
         }

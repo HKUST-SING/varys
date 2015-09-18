@@ -1,6 +1,8 @@
 package varys.framework.slave
 
 import java.net.InetAddress
+import java.util.NoSuchElementException
+import java.util.concurrent.ConcurrentLinkedQueue
 
 import akka.actor._
 import akka.pattern.ask
@@ -11,7 +13,8 @@ import varys.util._
 import varys.{Logging, VarysException}
 
 import scala.collection.concurrent.TrieMap
-import scala.collection.mutable
+import scala.collection.mutable.Set
+import scala.collection.JavaConversions._
 import scala.concurrent.{TimeoutException, Future, Await}
 import scala.util.{Success, Failure}
 import scala.concurrent.duration._
@@ -19,9 +22,9 @@ import scala.concurrent.ExecutionContext.Implicits.global
 
 private[varys] object Slave {
 
-  val host = InetAddress.getLocalHost.getHostName
+  val host = InetAddress.getLocalHost.getHostAddress
   val port = Option(System.getenv("VARYS_SLAVE_PORT")).getOrElse("1607").toInt
-  val masterIp = Option(System.getenv("VARYS_MASTER_IP")).getOrElse("localhost")
+  val masterIp = Option(System.getenv("VARYS_MASTER_IP")).getOrElse("127.0.0.1")
   val masterPort = Option(System.getenv("VARYS_MASTER_PORT")).getOrElse("1606")
   val masterUrl = "varys://" + masterIp + ":" + masterPort;
 
@@ -47,9 +50,11 @@ private[varys] object Slave {
 
   private[varys] class SlaveActor extends Actor with Logging {
 
+    implicit val timeout = Timeout(100.millis)
+
     val flowToActor = TrieMap[Flow, ActorRef]()
 
-    var flowQueue = mutable.Queue[Flow]()
+    val dstFlowQueue = TrieMap[String, ConcurrentLinkedQueue[Flow]]()
 
     override def preStart() = {
       context.actorSelection(Master.toAkkaUrl(masterUrl)).resolveOne(1.second).onComplete {
@@ -65,48 +70,56 @@ private[varys] object Slave {
     override def receive = {
 
       case RegisterClient(flow) =>
+
+        logDebug("Client connected with " + flow)
         flowToActor += flow -> sender
 
       case FlowCompleted(flow) =>
+
+        logDebug("Client disconnected with " + flow)
         flowToActor -= flow
 
-        implicit val timeout = Timeout(1.millis)
-        if (flowQueue.nonEmpty) {
-          val f = flowQueue.dequeue()
-          val actor = flowToActor(f)
+        val f = dstFlowQueue(flow.dIP).poll
+        if (f != null) {
           try {
-            val reply = (actor ? Start).mapTo[Unit]
-            Await.result(reply, timeout.duration)
+            val actor = flowToActor(f)
+            actor ! Start
           } catch {
-            case e: TimeoutException =>
-              self.tell(FlowCompleted(f), actor)
+            case e: NoSuchElementException => {}
           }
         }
 
       case StartSome(flows) =>
 
-        for (actor <- flowToActor.values) {
-          actor ! Pause
+        logTrace("Received StartSome for " + flows.mkString(", "))
+
+        dstFlowQueue.clear
+
+        for (f <- flows) {
+          try {
+            val actor = flowToActor(f)
+            actor ! Pause
+            if (!dstFlowQueue.contains(f.dIP)) {
+              dstFlowQueue(f.dIP) = new ConcurrentLinkedQueue[Flow]
+            }
+            dstFlowQueue(f.dIP).add(f)
+          } catch {
+            case e: NoSuchElementException => {}
+          }
         }
 
-        flowQueue = mutable.Queue[Flow]() ++ flows
-
-        implicit val timeout = Timeout(1.millis)
-        if (flowQueue.nonEmpty) {
-          val f = flowQueue.dequeue()
-          val actor = flowToActor(f)
+        for (flowQueue <- dstFlowQueue.values) {
+          val f = flowQueue.poll
           try {
-            val reply = (actor ? Start).mapTo[Unit]
-            Await.result(reply, timeout.duration)
+            val actor = flowToActor(f)
+            actor ! Start
           } catch {
-            case e: TimeoutException =>
-              self.tell(FlowCompleted(f), actor)
+            case e: NoSuchElementException => {}
           }
         }
 
       case GetLocalCoflows =>
 
-        implicit val timeout = Timeout(1.millis)
         val results = flowToActor.map({
           case (flow, actor) => Future {
             try {
@@ -118,14 +131,14 @@ private[varys] object Slave {
                 None
             }
           }
-        }).flatMap(Await.result(_, timeout.duration))
+        }).flatMap(Await.result(_, timeout.duration * 2))
 
         val coflows = results.groupBy(_.coflowId).map({
           case (coflowId, flowSizes) =>
             (coflowId, flowSizes.map(fs => (fs.flow, fs.bytesWritten)).toMap)
         })
 
-        logDebug("Sending LocalCoflows with " + coflows.size + " coflows")
+        logTrace("Sending LocalCoflows with " + coflows.size + " coflows")
         sender ! LocalCoflows(coflows)
     }
   }

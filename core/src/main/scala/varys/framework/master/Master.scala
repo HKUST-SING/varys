@@ -21,7 +21,7 @@ private[varys] object Master {
   val systemName = "varysMaster"
   val actorName = "Master"
 
-  val host = Option(System.getenv("VARYS_MASTER_IP")).getOrElse(InetAddress.getLocalHost.getHostName)
+  val host = Option(System.getenv("VARYS_MASTER_IP")).getOrElse(InetAddress.getLocalHost.getHostAddress)
   val port = Option(System.getenv("VARYS_MASTER_PORT")).getOrElse("1606").toInt
 
   def main(args: Array[String]) {
@@ -43,29 +43,36 @@ private[varys] object Master {
 
   def dbscan(flows: Array[Flow]): Map[String, Array[Flow]] = {
 
-    val Epsilon = 3
-    val MIN_DBSCAN_POINTS = 5
-    val unvisited = mutable.Set() ++ flows
-    val flowToCluster = mutable.Map[Flow, String]()
+    val epsilon = 1.5
+    val MIN_DBSCAN_POINTS = 3
+
+    def getNeighbors(i: Int): Set[Int] = {
+      (0 until flows.size).filter(j => {
+        flowDistance(flows(i), flows(j)) < epsilon
+      }).toSet
+    }
+
+    val unvisited = mutable.Set() ++ (0 until flows.size)
+    val flowToCluster = mutable.Map[Int, String]()
     var currentCluster = 0
     while (unvisited.nonEmpty) {
-      val flow = unvisited.head
-      unvisited -= flow
-      val neighbors = mutable.Set() ++ flows.filter(flowDistance(_, flow) < Epsilon)
-      if (neighbors.size < MIN_DBSCAN_POINTS) {
-        flowToCluster(flow) = (-1).toString
-      } else {
-        flowToCluster(flow) = currentCluster.toString
+      val i = unvisited.head
+      unvisited -= i
+      val neighbors = mutable.Set() ++ getNeighbors(i)
+      if (neighbors.size >= MIN_DBSCAN_POINTS) {
+        flowToCluster(i) = currentCluster.toString
         while (neighbors.nonEmpty) {
-          val f = neighbors.head
-          neighbors -= f
-          unvisited -= f
-          val newNeighbors = flows.filter(flowDistance(f, _) < Epsilon).toSet
-          if (newNeighbors.size >= MIN_DBSCAN_POINTS) {
-            neighbors ++= newNeighbors
-          }
-          if (!flowToCluster.contains(f)) {
-            flowToCluster(f) = currentCluster.toString
+          val j = neighbors.head
+          neighbors -= j
+          if (unvisited.contains(j)) {
+            unvisited -= j
+            val newNeighbors = getNeighbors(j)
+            if (newNeighbors.size >= MIN_DBSCAN_POINTS) {
+              neighbors ++= newNeighbors
+            }
+            if (!flowToCluster.contains(j)) {
+              flowToCluster(j) = currentCluster.toString
+            }
           }
         }
         currentCluster += 1
@@ -73,19 +80,14 @@ private[varys] object Master {
     }
 
     flowToCluster.groupBy(_._2).map({
-      case (coflowId, map) => (coflowId, map.keys.toArray)
+      case (coflowId, m) => (coflowId, m.keys.map(flows(_)).toArray)
     })
   }
 
-  def flowDistance(flow: Flow, other: Flow): Long = {
-    Math.abs(flow.startTime.getTime - other.startTime.getTime) / 2000 + {
-      if (flow.dPort == other.dPort) 0 else 1
-    } + {
-      if (flow.sPort == other.sPort) 0 else 1
-    } + {
-      if (flow.sIP == other.sIP) 0 else 1
-    } + {
-      if (flow.dIP == other.dIP) 0 else 1
+  def flowDistance(flow: Flow, other: Flow): Double = {
+    Math.abs(flow.startTime - other.startTime) / 5000.0 + {
+      if (flow.sPort == other.sPort) 0.0 else 1.0
+      if (flow.dPort == other.dPort) 0.0 else 1.0
     }
   }
 
@@ -98,7 +100,7 @@ private[varys] object Master {
     val slaveFlows = slaves.map(_ -> ArrayBuffer[Flow]()).toMap
 
     for (coflowId <- sortedCoflow) {
-      for (flow <- coflows(coflowId).keys) {
+      for (flow <- coflows(coflowId).toArray.sortBy(_._2).map(_._1)) {
         slaveFlows(flow.sIP) += flow
       }
     }
@@ -107,7 +109,9 @@ private[varys] object Master {
 
   private[varys] class MasterActor extends Actor with Logging {
 
-    val REMOTE_SYNC_PERIOD_MILLIS = System.getProperty("varys.framework.remoteSyncPeriod", "80").toInt
+    val REMOTE_SYNC_PERIOD_MILLIS = System.getProperty("varys.framework.remoteSyncPeriod", "1000").toInt
+
+    implicit val timeout = Timeout(1.second)
 
     val ipToSlave = TrieMap[String, ActorRef]()
 
@@ -119,10 +123,24 @@ private[varys] object Master {
       logInfo("Starting Varys master at varys://" + host + ":" + port)
 
       Utils.scheduleDaemonAtFixedRate(0, REMOTE_SYNC_PERIOD_MILLIS) {
+        self ! MergeAndSync
+      }
+    }
+
+    override def receive = {
+
+      case RegisterSlave(ip) =>
+        ipToSlave += ip -> sender
+        logInfo("Slave connected from " + ip)
+
+      case SlaveDisconnected(ip) =>
+        ipToSlave -= ip
+        logInfo("Slave disconnected from " + ip)
+
+      case MergeAndSync =>
 
         val start = System.currentTimeMillis
 
-        implicit val timeout = Timeout(20.millis)
         val results = ipToSlave.map({
           case (ip, actor) => Future {
             try {
@@ -134,14 +152,14 @@ private[varys] object Master {
                 None
             }
           }
-        }).flatMap(Await.result(_, timeout.duration))
+        }).flatMap(Await.result(_, timeout.duration * 2))
 
         val phase1 = System.currentTimeMillis
 
         coflows = results.flatMap(_.coflows).groupBy(_._1).map({
-          case (k, vs) => (k, vs.map(_._2).reduce(_ ++ _))
+          case (k, vs) => (k, vs.map(_._2).fold(Map[Flow, Long]())(_ ++ _))
         })
-        val flowSize = coflows.values.reduce(_ ++ _)
+        val flowSize = coflows.values.fold(Map[Flow, Long]())(_ ++ _)
 
         val cluster = dbscan(flowSize.keys.toArray)
         flowClusters = cluster.map({
@@ -154,7 +172,7 @@ private[varys] object Master {
           val trueCluster = flowSizes.keys.toSet
           var precision = 0.0
           var recall = 0.0
-          flowClusters.values.map(_.keys).foreach(flows => {
+          cluster.values.foreach(flows => {
             val predictedCluster = flows.toSet
             val intersection = trueCluster & predictedCluster
             val p = intersection.size.toDouble / predictedCluster.size
@@ -168,7 +186,7 @@ private[varys] object Master {
           })
           (coflowId, Map("precision" -> precision, "recall" -> recall))
         })
-        logInfo("Identification scores: " + scores)
+        logDebug(scores.mkString(", "))
 
         val phase3 = System.currentTimeMillis
 
@@ -178,23 +196,12 @@ private[varys] object Master {
 
         val phase4 = System.currentTimeMillis
 
-        logInfo("[Scheduler] "
+        logDebug("[Scheduler] " + flowSize.size + " flows "
           + "sync: " + (phase1 - start) + " ms, "
           + "cluster: " + (phase2 - phase1) + " ms, "
           + "score: " + (phase3 - phase2) + " ms, "
-          + "schedule: " + (phase4 - phase3))
-      }
-    }
+          + "schedule: " + (phase4 - phase3) + " ms")
 
-    override def receive = {
-
-      case RegisterSlave(ip) =>
-        ipToSlave += ip -> sender
-        logInfo("Slave connected from " + ip)
-
-      case SlaveDisconnected(ip) =>
-        ipToSlave -= ip
-        logInfo("Slave disconnected from " + ip)
     }
   }
 

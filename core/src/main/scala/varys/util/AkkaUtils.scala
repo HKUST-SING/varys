@@ -29,7 +29,7 @@ private[varys] object AkkaUtils {
     val akkaBatchSize = System.getProperty("varys.akka.batchSize", "15").toInt
     val akkaTimeout = System.getProperty("varys.akka.timeout", "60").toInt
     val akkaFrameSize = System.getProperty("varys.akka.frameSize", "10").toInt * 1048576
-    val logLevel = System.getProperty("varys.akka.logLevel", "OFF")
+    val logLevel = System.getProperty("varys.akka.logLevel", "ERROR")
     val lifecycleEvents = if (System.getProperty("varys.akka.logLifecycleEvents", "false").toBoolean) "on" else "off"
     val logRemoteEvents = if (System.getProperty("varys.akka.logRemoteEvents", "false").toBoolean) "on" else "off"
     val akkaWriteTimeout = System.getProperty("varys.akka.writeTimeout", "30").toInt
@@ -37,7 +37,7 @@ private[varys] object AkkaUtils {
     val akkaConf = ConfigFactory.parseString("""
       akka {
         daemonic = on
-        jvm-exit-on-fatal-error = off
+        jvm-exit-on-fatal-error = on
         loggers = ["akka.event.slf4j.Slf4jLogger"]
         extensions = ["com.romix.akka.serialization.kryo.KryoSerializationExtension$"]
 

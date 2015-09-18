@@ -4,7 +4,7 @@ all:
 clean:
 	./bin/stop-all.sh
 
-run: clean
+run: all clean
 	./bin/start-all.sh
 
 .PHONY: all clean run

@@ -24,6 +24,12 @@ class VarysOutputStream(val sock: Socket,
   extends OutputStream() with Logging {
 
   val host = InetAddress.getLocalHost.getHostAddress
+  val port = Option(System.getenv("VARYS_SLAVE_PORT")).getOrElse("1607").toInt
+  val slaveUrl = "varys://" + host + ":" + port
+
+  var slave: ActorRef = null
+  val slaveLock = new Object
+
   val flow = new Flow(sock.getLocalAddress.getHostAddress, sock.getLocalPort,
     sock.getInetAddress.getHostAddress, sock.getPort)
 
@@ -70,28 +76,28 @@ class VarysOutputStream(val sock: Socket,
 
   override def close() {
     closed.set(true)
-    clientActor ! FlowCompleted(flow)
+    slaveLock.synchronized {
+      if (slave != null) {
+        slave ! FlowCompleted(flow)
+      }
+    }
     rawStream.close()
   }
 
   private[client] class VarysOutputStreamActor extends Actor with Logging {
 
-    val port = Option(System.getenv("VARYS_SLAVE_PORT")).getOrElse("1607").toInt
-    val slaveUrl = "varys://" + host + ":" + port
-
-    var slave: ActorRef = null
-    val slaveLock = new Object
-
-    context.actorSelection(Slave.toAkkaUrl(slaveUrl)).resolveOne(1.second).onComplete {
-      case Success(actor) => {
-        if (!closed.get) {
-          slaveLock.synchronized {
-            slave = actor
-            slave ! RegisterClient(flow)
+    override def preStart = {
+      context.actorSelection(Slave.toAkkaUrl(slaveUrl)).resolveOne(1.second).onComplete {
+        case Success(actor) => {
+          if (!closed.get) {
+            slaveLock.synchronized {
+              actor ! RegisterClient(flow)
+              slave = actor
+            }
           }
         }
+        case Failure(_) => logDebug("Cannot connect to slave; fallback to non-blocking mode")
       }
-      case Failure(_) => logDebug("Cannot connect to slave; fallback to non-blocking mode")
     }
 
     override def receive = {
@@ -106,13 +112,7 @@ class VarysOutputStream(val sock: Socket,
 
       case GetFlowSize =>
         sender ! FlowSize(coflowId, flow, bytesWritten)
-
-      case FlowCompleted(flow) =>
-        slaveLock.synchronized {
-          if (slave != null) {
-            slave ! FlowCompleted(flow)
-          }
-        }
     }
   }
+
 }

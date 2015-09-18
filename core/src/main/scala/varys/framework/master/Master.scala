@@ -9,7 +9,7 @@ import akka.util.Timeout
 import scala.collection.mutable
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.{TimeoutException, Await, Future}
+import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext.Implicits.global
 import varys.framework._
@@ -18,15 +18,19 @@ import varys.util.AkkaUtils
 
 private[varys] object Master {
 
-  val systemName = "varysMaster"
-  val actorName = "Master"
+  val REMOTE_SYNC_PERIOD_MILLIS = System.getProperty("varys.framework.remoteSyncPeriod", "100").toInt
 
   val host = Option(System.getenv("VARYS_MASTER_IP")).getOrElse(InetAddress.getLocalHost.getHostAddress)
   val port = Option(System.getenv("VARYS_MASTER_PORT")).getOrElse("1606").toInt
 
+  val systemName = "varysMaster"
+  val actorName = "Master"
+
+  val ipToSlave = TrieMap[String, ActorRef]()
+
   def main(args: Array[String]) {
     val (actorSystem, _) = AkkaUtils.createActorSystem(systemName, host, port)
-    actorSystem.actorOf(Props(new MasterActor), name = actorName)
+    val actor = actorSystem.actorOf(Props(new MasterActor), name = actorName)
 
     actorSystem.awaitTermination()
   }
@@ -43,8 +47,8 @@ private[varys] object Master {
 
   def dbscan(flows: Array[Flow]): Map[String, Array[Flow]] = {
 
-    val epsilon = 1.5
-    val MIN_DBSCAN_POINTS = 3
+    val epsilon = 1
+    val MIN_DBSCAN_POINTS = 0
 
     def getNeighbors(i: Int): Set[Int] = {
       (0 until flows.size).filter(j => {
@@ -59,20 +63,15 @@ private[varys] object Master {
       val i = unvisited.head
       unvisited -= i
       val neighbors = mutable.Set() ++ getNeighbors(i)
-      if (neighbors.size >= MIN_DBSCAN_POINTS) {
-        flowToCluster(i) = currentCluster.toString
-        while (neighbors.nonEmpty) {
-          val j = neighbors.head
-          neighbors -= j
-          if (unvisited.contains(j)) {
-            unvisited -= j
-            val newNeighbors = getNeighbors(j)
-            if (newNeighbors.size >= MIN_DBSCAN_POINTS) {
-              neighbors ++= newNeighbors
-            }
-            if (!flowToCluster.contains(j)) {
-              flowToCluster(j) = currentCluster.toString
-            }
+      flowToCluster(i) = currentCluster.toString
+      while (neighbors.nonEmpty) {
+        val j = neighbors.head
+        neighbors -= j
+        if (unvisited.contains(j)) {
+          unvisited -= j
+          neighbors ++= getNeighbors(j)
+          if (!flowToCluster.contains(j)) {
+            flowToCluster(j) = currentCluster.toString
           }
         }
         currentCluster += 1
@@ -85,10 +84,7 @@ private[varys] object Master {
   }
 
   def flowDistance(flow: Flow, other: Flow): Double = {
-    Math.abs(flow.startTime - other.startTime) / 5000.0 + {
-      if (flow.sPort == other.sPort) 0.0 else 1.0
-      if (flow.dPort == other.dPort) 0.0 else 1.0
-    }
+    Math.abs(flow.startTime - other.startTime) / 1000.0
   }
 
   def getSchedule(slaves: Array[String], coflows: Map[String, Map[Flow, Long]]): Map[String, Array[Flow]] = {
@@ -109,14 +105,7 @@ private[varys] object Master {
 
   private[varys] class MasterActor extends Actor with Logging {
 
-    val REMOTE_SYNC_PERIOD_MILLIS = System.getProperty("varys.framework.remoteSyncPeriod", "1000").toInt
-
-    implicit val timeout = Timeout(1.second)
-
-    val ipToSlave = TrieMap[String, ActorRef]()
-
-    var coflows = Map[String, Map[Flow, Long]]()
-    var flowClusters = Map[String, Map[Flow, Long]]()
+    import context.dispatcher
 
     override def preStart() {
 
@@ -141,28 +130,28 @@ private[varys] object Master {
 
         val start = System.currentTimeMillis
 
-        val results = ipToSlave.map({
-          case (ip, actor) => Future {
-            try {
-              val reply = (actor ? GetLocalCoflows).mapTo[LocalCoflows]
+        implicit val timeout = Timeout(50.millis)
+        val replies = Future.sequence(ipToSlave.map {
+          case (ip, actor) => {
+            val reply = (actor ? GetLocalCoflows).mapTo[LocalCoflows]
+            Future {
               Some(Await.result(reply, timeout.duration))
-            } catch {
-              case e: TimeoutException =>
-                self.tell(SlaveDisconnected(ip), actor)
-                None
+            } recover {
+              case e: Throwable => None
             }
           }
-        }).flatMap(Await.result(_, timeout.duration * 2))
+        })
+        val results = Await.result(replies, 2 * timeout.duration).flatten
 
         val phase1 = System.currentTimeMillis
 
-        coflows = results.flatMap(_.coflows).groupBy(_._1).map({
+        val coflows = results.flatMap(_.coflows).groupBy(_._1).map({
           case (k, vs) => (k, vs.map(_._2).fold(Map[Flow, Long]())(_ ++ _))
         })
         val flowSize = coflows.values.fold(Map[Flow, Long]())(_ ++ _)
 
         val cluster = dbscan(flowSize.keys.toArray)
-        flowClusters = cluster.map({
+        val flowClusters = cluster.map({
           case (k, fs) => (k, fs.map(f => (f, flowSize(f))).toMap)
         })
 

@@ -23,26 +23,22 @@ class VarysOutputStream(val sock: Socket,
                         val coflowId: String)
   extends OutputStream() with Logging {
 
+  val REMOTE_SYNC_PERIOD_MILLIS = System.getProperty("varys.framework.remoteSyncPeriod", "100").toInt
+
   val host = InetAddress.getLocalHost.getHostAddress
   val port = Option(System.getenv("VARYS_SLAVE_PORT")).getOrElse("1607").toInt
   val slaveUrl = "varys://" + host + ":" + port
-
-  var slave: ActorRef = null
   val slaveLock = new Object
-
   val flow = new Flow(sock.getLocalAddress.getHostAddress, sock.getLocalPort,
     sock.getInetAddress.getHostAddress, sock.getPort)
-
   val clientName = flow.sIP.replace(".", "-") + "-" + System.currentTimeMillis
   val (actorSystem, _) = AkkaUtils.createActorSystem(clientName, host, 0)
   val clientActor = actorSystem.actorOf(Props(new VarysOutputStreamActor))
-
   val rawStream = sock.getOutputStream
   val canProceed = new AtomicBoolean(true)
   val canProceedLock = new Object
-  var bytesWritten = 0L
-
-  val closed = new AtomicBoolean(false)
+  var slave: ActorRef = null
+  var bytesWritten = new AtomicLong(0L)
 
   override def write(b: Int) = synchronized {
     preWrite()
@@ -71,31 +67,31 @@ class VarysOutputStream(val sock: Socket,
   }
 
   private def postWrite(writeLen: Long) {
-    bytesWritten += writeLen
+    slaveLock.synchronized {
+      if (slave != null) {
+        slave ! FlowSize(coflowId, flow, bytesWritten.addAndGet(writeLen))
+      }
+    }
   }
 
   override def close() {
-    closed.set(true)
+    rawStream.close()
     slaveLock.synchronized {
       if (slave != null) {
         slave ! FlowCompleted(flow)
       }
     }
-    rawStream.close()
   }
 
   private[client] class VarysOutputStreamActor extends Actor with Logging {
 
-    override def preStart = {
+    override def preStart() = {
       context.actorSelection(Slave.toAkkaUrl(slaveUrl)).resolveOne(1.second).onComplete {
-        case Success(actor) => {
-          if (!closed.get) {
-            slaveLock.synchronized {
-              actor ! RegisterClient(flow)
-              slave = actor
-            }
+        case Success(actor) =>
+          slaveLock.synchronized {
+            actor ! RegisterClient(flow)
+            slave = actor
           }
-        }
         case Failure(_) => logDebug("Cannot connect to slave; fallback to non-blocking mode")
       }
     }
@@ -109,9 +105,6 @@ class VarysOutputStream(val sock: Socket,
         canProceedLock.synchronized {
           canProceedLock.notifyAll()
         }
-
-      case GetFlowSize =>
-        sender ! FlowSize(coflowId, flow, bytesWritten)
     }
   }
 

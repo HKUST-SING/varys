@@ -7,13 +7,11 @@ private[varys] object MergeAndSync
 // Slave <-> Master
 private[varys] case object GetLocalCoflows
 
-private[varys] case class LocalCoflows(coflows: Map[String, Map[Flow, Long]])
+private[varys] case class LocalCoflows(host: String,
+                                       coflows: Map[String, Map[Flow, Long]])
   extends FrameworkMessage
 
 private[varys] case class RegisterSlave(ip: String)
-  extends FrameworkMessage
-
-private[varys] case class SlaveDisconnected(ip: String)
   extends FrameworkMessage
 
 private[varys] case class StartSome(flows: Array[Flow])

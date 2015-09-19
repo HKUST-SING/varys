@@ -3,15 +3,10 @@ package varys.framework.master
 import java.net.InetAddress
 
 import akka.actor._
-import akka.pattern.ask
-import akka.util.Timeout
 
 import scala.collection.mutable
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.{Await, Future}
-import scala.concurrent.duration._
-import scala.concurrent.ExecutionContext.Implicits.global
 import varys.framework._
 import varys.{Utils, Logging, VarysException}
 import varys.util.AkkaUtils
@@ -27,10 +22,11 @@ private[varys] object Master {
   val actorName = "Master"
 
   val ipToSlave = TrieMap[String, ActorRef]()
+  val ipToCoflows = TrieMap[String, LocalCoflows]()
 
   def main(args: Array[String]) {
     val (actorSystem, _) = AkkaUtils.createActorSystem(systemName, host, port)
-    val actor = actorSystem.actorOf(Props(new MasterActor), name = actorName)
+    actorSystem.actorOf(Props(new MasterActor), name = actorName)
 
     actorSystem.awaitTermination()
   }
@@ -47,16 +43,13 @@ private[varys] object Master {
 
   def dbscan(flows: Array[Flow]): Map[String, Array[Flow]] = {
 
-    val epsilon = 1
-    val MIN_DBSCAN_POINTS = 0
+    val epsilon = 5.0
 
-    def getNeighbors(i: Int): Set[Int] = {
-      (0 until flows.size).filter(j => {
-        flowDistance(flows(i), flows(j)) < epsilon
-      }).toSet
-    }
+    def getNeighbors(i: Int): Set[Int] = flows.indices.filter(j => {
+      flowDistance(flows(i), flows(j)) < epsilon
+    }).toSet
 
-    val unvisited = mutable.Set() ++ (0 until flows.size)
+    val unvisited = mutable.Set() ++ flows.indices
     val flowToCluster = mutable.Map[Int, String]()
     var currentCluster = 0
     while (unvisited.nonEmpty) {
@@ -105,8 +98,6 @@ private[varys] object Master {
 
   private[varys] class MasterActor extends Actor with Logging {
 
-    import context.dispatcher
-
     override def preStart() {
 
       logInfo("Starting Varys master at varys://" + host + ":" + port)
@@ -118,42 +109,25 @@ private[varys] object Master {
 
     override def receive = {
 
-      case RegisterSlave(ip) =>
-        ipToSlave += ip -> sender
-        logInfo("Slave connected from " + ip)
-
-      case SlaveDisconnected(ip) =>
-        ipToSlave -= ip
-        logInfo("Slave disconnected from " + ip)
+      case LocalCoflows(ip, coflows) =>
+        ipToSlave(ip) = sender
+        ipToCoflows(ip) = LocalCoflows(ip, coflows)
 
       case MergeAndSync =>
 
-        val start = System.currentTimeMillis
-
-        implicit val timeout = Timeout(50.millis)
-        val replies = Future.sequence(ipToSlave.map {
-          case (ip, actor) => {
-            val reply = (actor ? GetLocalCoflows).mapTo[LocalCoflows]
-            Future {
-              Some(Await.result(reply, timeout.duration))
-            } recover {
-              case e: Throwable => None
-            }
-          }
-        })
-        val results = Await.result(replies, 2 * timeout.duration).flatten
-
         val phase1 = System.currentTimeMillis
 
-        val coflows = results.flatMap(_.coflows).groupBy(_._1).map({
-          case (k, vs) => (k, vs.map(_._2).fold(Map[Flow, Long]())(_ ++ _))
+        val coflows = ipToCoflows.values.flatMap(_.coflows).groupBy(_._1).map({
+          case (k, vs) => (k, vs.map(_._2).fold(mutable.Map[Flow, Long]())(_ ++ _).toMap)
         })
-        val flowSize = coflows.values.fold(Map[Flow, Long]())(_ ++ _)
+        val flowSize = coflows.values.fold(mutable.Map[Flow, Long]())(_ ++ _).toMap
 
         val cluster = dbscan(flowSize.keys.toArray)
+        /*
         val flowClusters = cluster.map({
           case (k, fs) => (k, fs.map(f => (f, flowSize(f))).toMap)
         })
+        */
 
         val phase2 = System.currentTimeMillis
 
@@ -180,14 +154,13 @@ private[varys] object Master {
         val phase3 = System.currentTimeMillis
 
         getSchedule(ipToSlave.keys.toArray, coflows).foreach({
-          case (ip, flows) => ipToSlave(ip) ! StartSome(flows)
+          case (ip, flows) => ipToSlave.get(ip).foreach(_ ! StartSome(flows))
         })
 
         val phase4 = System.currentTimeMillis
 
         logDebug("[Scheduler] " + flowSize.size + " flows "
-          + "sync: " + (phase1 - start) + " ms, "
-          + "cluster: " + (phase2 - phase1) + " ms, "
+          + "clustering: " + (phase2 - phase1) + " ms, "
           + "score: " + (phase3 - phase2) + " ms, "
           + "schedule: " + (phase4 - phase3) + " ms")
 

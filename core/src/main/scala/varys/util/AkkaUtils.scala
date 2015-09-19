@@ -1,21 +1,12 @@
 package varys.util
 
 import akka.actor._
-import akka.pattern.ask
-
 import com.typesafe.config.ConfigFactory
-
-import scala.concurrent.duration._
-import scala.concurrent.Await
-
-import varys.VarysException
 
 /**
  * Various utility classes for working with Akka.
  */
 private[varys] object AkkaUtils {
-
-  val AKKA_TIMEOUT_MS: Int = System.getProperty("varys.akka.timeout", "30").toInt * 1000
 
   /**
    * Creates an ActorSystem ready for remoting, with various Varys features. Returns both the
@@ -29,9 +20,6 @@ private[varys] object AkkaUtils {
     val akkaBatchSize = System.getProperty("varys.akka.batchSize", "15").toInt
     val akkaTimeout = System.getProperty("varys.akka.timeout", "60").toInt
     val akkaFrameSize = System.getProperty("varys.akka.frameSize", "10").toInt * 1048576
-    val logLevel = System.getProperty("varys.akka.logLevel", "ERROR")
-    val lifecycleEvents = if (System.getProperty("varys.akka.logLifecycleEvents", "false").toBoolean) "on" else "off"
-    val logRemoteEvents = if (System.getProperty("varys.akka.logRemoteEvents", "false").toBoolean) "on" else "off"
     val akkaWriteTimeout = System.getProperty("varys.akka.writeTimeout", "30").toInt
 
     val akkaConf = ConfigFactory.parseString("""
@@ -83,14 +71,9 @@ private[varys] object AkkaUtils {
             classes = [
               "varys.framework.Flow",
               "[Lvarys.framework.Flow;",
-              "varys.framework.GetLocalCoflows",
               "varys.framework.LocalCoflows",
-              "varys.framework.RegisterSlave",
               "varys.framework.StartSome",
-              "varys.framework.GetFlowSize",
-              "varys.framework.FlowSize",
-              "varys.framework.RegisterClient",
-              "varys.framework.FlowCompleted",
+              "varys.framework.ClientCoflows",
               "varys.framework.Pause",
               "varys.framework.Start",
               "scala.collection.immutable.Map$EmptyMap$",
@@ -104,8 +87,8 @@ private[varys] object AkkaUtils {
         }
       }
 
-      akka.loglevel = "%s"
-      akka.stdout-loglevel = "%s"
+      akka.loglevel = INFO
+      akka.stdout-loglevel = WARNING
       akka.remote.netty.tcp.transport-class = "akka.remote.transport.netty.NettyTransport"
       akka.remote.netty.tcp.hostname = "%s"
       akka.remote.netty.tcp.port = %d
@@ -114,22 +97,14 @@ private[varys] object AkkaUtils {
       akka.remote.netty.tcp.maximum-frame-size = %dB
       akka.remote.netty.tcp.execution-pool-size = %d
       akka.actor.default-dispatcher.throughput = %d
-      akka.remote.log-remote-lifecycle-events = %s
-      akka.remote.log-sent-messages = %s
-      akka.remote.log-received-messages = %s
       akka.remote.netty.write-timeout = %ds
       """.format(
-        logLevel,
-        logLevel,
         host,
         port,
         akkaTimeout,
         akkaFrameSize,
         akkaThreads,
         akkaBatchSize,
-        lifecycleEvents,
-        logRemoteEvents,
-        logRemoteEvents,
         akkaWriteTimeout))
 
     val actorSystem = ActorSystem(name, akkaConf)
@@ -138,6 +113,6 @@ private[varys] object AkkaUtils {
     // hack because Akka doesn't let you figure out the port through the public API yet.
     val provider = actorSystem.asInstanceOf[ExtendedActorSystem].provider
     val boundPort = provider.getDefaultAddress.port.get
-    return (actorSystem, boundPort)
+    (actorSystem, boundPort)
   }
 }

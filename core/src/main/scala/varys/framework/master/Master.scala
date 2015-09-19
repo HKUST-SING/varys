@@ -22,7 +22,7 @@ private[varys] object Master {
   val actorName = "Master"
 
   val ipToSlave = TrieMap[String, ActorRef]()
-  val ipToCoflows = TrieMap[String, LocalCoflows]()
+  val slaveToCoflows = TrieMap[ActorRef, LocalCoflows]()
 
   def main(args: Array[String]) {
     val (actorSystem, _) = AkkaUtils.createActorSystem(systemName, host, port)
@@ -41,43 +41,23 @@ private[varys] object Master {
     }
   }
 
-  def dbscan(flows: Array[Flow]): Map[String, Array[Flow]] = {
+  def clustering(flows: Array[Flow]): Map[String, Array[Flow]] = {
 
-    val epsilon = 5.0
+    val epsilon = 5000.0
+    var lastStartTime = 0L
 
-    def getNeighbors(i: Int): Set[Int] = flows.indices.filter(j => {
-      flowDistance(flows(i), flows(j)) < epsilon
-    }).toSet
+    val clusterIds = flows.sortBy(_.startTime).map(flow => {
+      val split = flow.startTime > lastStartTime + epsilon
+      lastStartTime = flow.startTime
+      split
+    }).scanLeft(-1)((currentCluster, split) => {
+      if (split) currentCluster + 1 else currentCluster
+    })
 
-    val unvisited = mutable.Set() ++ flows.indices
-    val flowToCluster = mutable.Map[Int, String]()
-    var currentCluster = 0
-    while (unvisited.nonEmpty) {
-      val i = unvisited.head
-      unvisited -= i
-      val neighbors = mutable.Set() ++ getNeighbors(i)
-      flowToCluster(i) = currentCluster.toString
-      while (neighbors.nonEmpty) {
-        val j = neighbors.head
-        neighbors -= j
-        if (unvisited.contains(j)) {
-          unvisited -= j
-          neighbors ++= getNeighbors(j)
-          if (!flowToCluster.contains(j)) {
-            flowToCluster(j) = currentCluster.toString
-          }
-        }
-        currentCluster += 1
-      }
+    clusterIds.zip(flows).groupBy(_._1).map {
+      case (id, vs) => (id.toString, vs.map(_._2))
     }
 
-    flowToCluster.groupBy(_._2).map({
-      case (coflowId, m) => (coflowId, m.keys.map(flows(_)).toArray)
-    })
-  }
-
-  def flowDistance(flow: Flow, other: Flow): Double = {
-    Math.abs(flow.startTime - other.startTime) / 1000.0
   }
 
   def getSchedule(slaves: Array[String], coflows: Map[String, Map[Flow, Long]]): Map[String, Array[Flow]] = {
@@ -111,18 +91,26 @@ private[varys] object Master {
 
       case LocalCoflows(ip, coflows) =>
         ipToSlave(ip) = sender
-        ipToCoflows(ip) = LocalCoflows(ip, coflows)
+        slaveToCoflows(sender) = LocalCoflows(ip, coflows)
+        context.watch(sender)
+
+      case Terminated(actor) =>
+        slaveToCoflows.get(actor).foreach {
+          ipToSlave -= _.host
+        }
+        slaveToCoflows -= actor
+        context.unwatch(actor)
 
       case MergeAndSync =>
 
         val phase1 = System.currentTimeMillis
 
-        val coflows = ipToCoflows.values.flatMap(_.coflows).groupBy(_._1).map({
+        val coflows = slaveToCoflows.values.flatMap(_.coflows).groupBy(_._1).map({
           case (k, vs) => (k, vs.map(_._2).fold(mutable.Map[Flow, Long]())(_ ++ _).toMap)
         })
         val flowSize = coflows.values.fold(mutable.Map[Flow, Long]())(_ ++ _).toMap
 
-        val cluster = dbscan(flowSize.keys.toArray)
+        val cluster = clustering(flowSize.keys.toArray)
         /*
         val flowClusters = cluster.map({
           case (k, fs) => (k, fs.map(f => (f, flowSize(f))).toMap)

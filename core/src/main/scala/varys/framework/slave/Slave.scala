@@ -12,6 +12,7 @@ import varys.util._
 import varys.{Utils, Logging, VarysException}
 
 import scala.collection.concurrent.TrieMap
+import scala.collection.mutable
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
@@ -28,8 +29,8 @@ private[varys] object Slave {
   val systemName = "varysSlave"
   val actorName = "Slave"
 
-  val flowToActor = TrieMap[Flow, ActorRef]()
-  val flowToSize = TrieMap[Flow, FlowSize]()
+  val flowToClient = TrieMap[Flow, ActorRef]()
+  val clientToCoflows = TrieMap[ActorRef, ClientCoflows]()
   val dstFlowQueue = TrieMap[String, ConcurrentLinkedQueue[Flow]]()
 
   def main(argStrings: Array[String]) {
@@ -58,33 +59,43 @@ private[varys] object Slave {
     }
 
     override def preStart() = {
+      logInfo("Starting Varys slave at varys://" + host + ":" + port)
+
       Utils.scheduleDaemonAtFixedRate(0, REMOTE_SYNC_PERIOD_MILLIS) {
-        self ! GetLocalCoflows
+        self ! MergeAndSync
       }
     }
 
     override def receive = {
 
-      case FlowSize(coflowId, flow, bytesWritten) =>
+      case ClientCoflows(coflows) =>
 
-        flowToSize(flow) = FlowSize(coflowId, flow, bytesWritten)
-        flowToActor(flow) = sender
-
-      case FlowCompleted(flow) =>
-
-        logDebug("Client disconnected with " + flow)
-        flowToSize -= flow
-        flowToActor -= flow
-
-        dstFlowQueue.get(flow.dIP).foreach {
-          queue => Option(queue.poll()).foreach(startOne)
+        coflows.foreach {
+          case (coflowId, flowSize) =>
+            flowSize.keys.foreach(flowToClient(_) = sender)
         }
+        clientToCoflows(sender) = ClientCoflows(coflows)
+        context.watch(sender)
 
-      case GetLocalCoflows =>
+      case Terminated(actor) =>
 
-        val coflows = flowToSize.values.groupBy(_.coflowId).map({
-          case (coflowId, flowSizes) =>
-            (coflowId, flowSizes.map(fs => (fs.flow, fs.bytesWritten)).toMap)
+        clientToCoflows.get(actor).foreach(message => {
+          message.coflows.values.flatMap(_.keys).foreach(flow => {
+            flowToClient -= flow
+
+            dstFlowQueue.get(flow.dIP).foreach {
+              queue => Option(queue.poll()).foreach(startOne)
+            }
+          })
+        })
+
+        clientToCoflows -= actor
+        context.unwatch(actor)
+
+      case MergeAndSync =>
+
+        val coflows = clientToCoflows.values.flatMap(_.coflows).groupBy(_._1).map({
+          case (k, vs) => (k, vs.map(_._2).fold(mutable.Map[Flow, Long]())(_ ++ _).toMap)
         })
 
         logTrace("Sending LocalCoflows with " + coflows.size + " coflows")
@@ -98,8 +109,8 @@ private[varys] object Slave {
 
         for (f <- flows) {
           try {
-            val actor = flowToActor(f)
-            actor ! Pause
+            val actor = flowToClient(f)
+            actor ! Pause(f)
             if (!dstFlowQueue.contains(f.dIP)) {
               dstFlowQueue(f.dIP) = new ConcurrentLinkedQueue[Flow]
             }
@@ -115,7 +126,7 @@ private[varys] object Slave {
     }
 
     def startOne(f: Flow) {
-      flowToActor.get(f).foreach(_ ! Start)
+      flowToClient.get(f).foreach(_ ! Start(f))
     }
   }
 

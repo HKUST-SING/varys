@@ -87,8 +87,8 @@ private[varys] object AkkaUtils {
         }
       }
 
-      akka.loglevel = INFO
-      akka.stdout-loglevel = WARNING
+      akka.loglevel = OFF
+      akka.stdout-loglevel = OFF
       akka.remote.netty.tcp.transport-class = "akka.remote.transport.netty.NettyTransport"
       akka.remote.netty.tcp.hostname = "%s"
       akka.remote.netty.tcp.port = %d

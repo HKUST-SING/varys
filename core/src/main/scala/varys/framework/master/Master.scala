@@ -1,5 +1,6 @@
 package varys.framework.master
 
+import java.util.Date
 import java.net.InetAddress
 
 import akka.actor._
@@ -43,19 +44,22 @@ private[varys] object Master {
 
   def clustering(flows: Array[Flow]): Map[String, Array[Flow]] = {
 
-    val epsilon = 5000.0
-    var lastStartTime = 0L
+    val epsilon = 100L
 
-    val clusterIds = flows.sortBy(_.startTime).map(flow => {
-      val split = flow.startTime > lastStartTime + epsilon
-      lastStartTime = flow.startTime
-      split
-    }).scanLeft(-1)((currentCluster, split) => {
-      if (split) currentCluster + 1 else currentCluster
+    val sortedIndices = flows.indices.sortBy(flows(_).startTime)
+    var lastStartTime = 0L
+    var currentCluster = -1
+
+    val clusterIds = sortedIndices.map(i => {
+      if (lastStartTime + epsilon < flows(i).startTime) {
+        currentCluster += 1
+      }
+      lastStartTime = flows(i).startTime
+      currentCluster
     })
 
-    clusterIds.zip(flows).groupBy(_._1).map {
-      case (id, vs) => (id.toString, vs.map(_._2))
+    clusterIds.zip(sortedIndices).groupBy(_._1).map {
+      case (id, tuples) => (id.toString, tuples.map(tuple => flows(tuple._2)).toArray)
     }
 
   }
@@ -111,11 +115,9 @@ private[varys] object Master {
         val flowSize = coflows.values.fold(mutable.Map[Flow, Long]())(_ ++ _).toMap
 
         val cluster = clustering(flowSize.keys.toArray)
-        /*
         val flowClusters = cluster.map({
           case (k, fs) => (k, fs.map(f => (f, flowSize(f))).toMap)
         })
-        */
 
         val phase2 = System.currentTimeMillis
 
@@ -137,11 +139,11 @@ private[varys] object Master {
           })
           (coflowId, Map("precision" -> precision, "recall" -> recall))
         })
-        logDebug(scores.mkString(", "))
+        logDebug(scores.mkString(" | "))
 
         val phase3 = System.currentTimeMillis
 
-        getSchedule(ipToSlave.keys.toArray, coflows).foreach({
+        getSchedule(ipToSlave.keys.toArray, flowClusters).foreach({
           case (ip, flows) => ipToSlave.get(ip).foreach(_ ! StartSome(flows))
         })
 
